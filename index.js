@@ -8,7 +8,7 @@ const FormData = require('form-data'); // Needed for slip upload
 const https = require('https');
 const http = require('http'); // Needed for HTTP server option
 const { Writable } = require('stream'); // Needed for downloading image to buffer
-const axios = require('axios'); // For Xncly Slip Check API, FB connection check, and Angpao Redeem
+const axios = require('axios'); // For Xncly Slip Check API, FB connection check, Angpao Redeem, and AI Chat
 const crypto = require('crypto'); // For code generation/hashing
 
 // --- File Paths ---
@@ -46,7 +46,11 @@ const DEFAULT_CONFIG = {
     serverPort: 3000, // Default port (will use 8443 if HTTPS detected initially)
     enableHttps: false,
     sslKeyPath: '/etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem', // Default placeholder path
-    sslCertPath: '/etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem' // Default placeholder path
+    sslCertPath: '/etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem', // Default placeholder path
+    // --- NEW: AI Chat Settings ---
+    aiChatEnabled: false,
+    aiApiKey: '', // Default API Key REMOVED - must be set in admin settings if enabled
+    aiApiUrl: 'https://bots.easy-peasy.ai/bot/9bc091b4-8477-4844-8b53-a354244f53e8/api' // Default API URL
 };
 
 // --- Global Variables ---
@@ -91,6 +95,10 @@ function loadConfig() {
         loadedConfig.sslKeyPath = loadedConfig.sslKeyPath || DEFAULT_CONFIG.sslKeyPath;
         loadedConfig.sslCertPath = loadedConfig.sslCertPath || DEFAULT_CONFIG.sslCertPath;
         loadedConfig.walletPhone = String(loadedConfig.walletPhone || '').trim(); // Ensure wallet phone is string
+        // AI Settings Type Enforcement
+        loadedConfig.aiChatEnabled = loadedConfig.aiChatEnabled === true;
+        loadedConfig.aiApiKey = String(loadedConfig.aiApiKey || '').trim();
+        loadedConfig.aiApiUrl = String(loadedConfig.aiApiUrl || '').trim();
 
     } catch (error) {
         console.error(`Error loading config.json: ${error.message}. Using default values.`);
@@ -107,6 +115,10 @@ function saveConfig() {
         loadedConfig.serverPort = parseInt(loadedConfig.serverPort, 10) || DEFAULT_CONFIG.serverPort;
         loadedConfig.enableHttps = loadedConfig.enableHttps === true;
         loadedConfig.walletPhone = String(loadedConfig.walletPhone || '').trim();
+        // AI Settings Type Enforcement
+        loadedConfig.aiChatEnabled = loadedConfig.aiChatEnabled === true;
+        loadedConfig.aiApiKey = String(loadedConfig.aiApiKey || '').trim();
+        loadedConfig.aiApiUrl = String(loadedConfig.aiApiUrl || '').trim();
 
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(loadedConfig, null, 2), 'utf8');
         console.log("Configuration saved to config.json.");
@@ -424,6 +436,61 @@ async function sendQuickReplies(sender, text, quickReplies) {
     }
 }
 // --- End Facebook API Functions ---
+
+// --- AI Chat API Function ---
+async function getAIResponse(messageText) {
+    if (!loadedConfig.aiChatEnabled) {
+        console.log("AI Chat is disabled in settings.");
+        return null;
+    }
+    if (!loadedConfig.aiApiKey || !loadedConfig.aiApiUrl) {
+        console.error("AI Chat Error: API Key or URL is missing in settings.");
+        return null; // Or a generic error message?
+    }
+
+    console.log(`Sending message to AI: "${messageText.substring(0, 50)}..."`);
+    try {
+        const response = await axios.post(loadedConfig.aiApiUrl, {
+            "message": messageText,
+            "history": [], // Keep history simple for now
+            "stream": false,
+            "include_sources": false
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-API-Key': loadedConfig.aiApiKey // Use the key from config
+            },
+            timeout: 20000 // 20 second timeout
+        });
+
+        // Need to check the *actual* structure of the successful response from Easy-Peasy AI
+        // Assuming the response text is in `response.data.response` based on common patterns
+        const aiReply = response.data?.response || response.data?.text || response.data?.result; // Try common fields
+
+        if (response.status === 200 && typeof aiReply === 'string' && aiReply.trim()) {
+            console.log(`AI response received: "${aiReply.substring(0, 100)}..."`);
+            return aiReply.trim();
+        } else {
+            console.error("AI Chat Error: Received unexpected response structure or empty reply.", response.status, response.data);
+            return null; // Or a specific error message
+        }
+    } catch (error) {
+        console.error('AI Chat API Error:', error.message);
+        if (axios.isAxiosError(error)) {
+            if (error.response) {
+                console.error('AI API Error Response Status:', error.response.status);
+                console.error('AI API Error Response Data:', error.response.data);
+            } else if (error.request) {
+                console.error('AI API Error: No response received from server.');
+            }
+            if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+                console.error('AI API Error: Request timed out.');
+            }
+        }
+        return null; // Indicate failure
+    }
+}
+// --- End AI Chat Function ---
 
 // --- Shop Logic Functions ---
 function getUserData(sender) {
@@ -994,11 +1061,11 @@ async function processPaymentMethod(sender, method) {
 async function handleCheckoutTextInput(sender, text) {
     try {
         const user = getUserData(sender);
-        if (!user.checkoutState) return false;
+        if (!user.checkoutState) return false; // Not in checkout
 
         if (user.checkoutState.step === 'awaiting_discount_code') {
             await applyDiscountCode(sender, text);
-            return true;
+            return true; // Handled (successfully or with error message)
         }
 
         if (user.checkoutState.step === 'awaiting_angpao_link') {
@@ -1006,7 +1073,7 @@ async function handleCheckoutTextInput(sender, text) {
             const match = text.trim().match(LINK_REGEX);
             if (!match) {
                 await sendMessage(sender, "⚠️ ลิงก์ซองอั่งเปาไม่ถูกต้อง กรุณาส่งลิงก์ที่ขึ้นต้นด้วย `https://gift.truemoney.com/...`");
-                return true;
+                return true; // Input received, but invalid format, handled by sending message
             }
             const angpaoLink = match[0];
             const phoneToRedeemWith = loadedConfig.walletPhone;
@@ -1015,6 +1082,7 @@ async function handleCheckoutTextInput(sender, text) {
             if (!phoneToRedeemWith) {
                 console.error("Angpao Error: Wallet phone to redeem with is not configured!");
                 await sendMessage(sender, "❌ เกิดข้อผิดพลาด: ระบบ Wallet ไม่พร้อมใช้งาน กรุณาติดต่อแอดมิน");
+                await cancelPayment(sender); // Critical config error, cancel
                 return true;
             }
 
@@ -1026,8 +1094,9 @@ async function handleCheckoutTextInput(sender, text) {
                 await completeOrder(sender, 'angpao', angpaoLink);
             } else {
                 await sendMessage(sender, `❌ การรับซอง ล้มเหลว: ${verificationResult.message}`);
+                // Do NOT cancel payment automatically here, let user retry or cancel manually
             }
-            return true;
+            return true; // Handled the angpao link attempt
         }
 
         if (user.checkoutState.step === 'awaiting_redeem_code') {
@@ -1035,7 +1104,7 @@ async function handleCheckoutTextInput(sender, text) {
             const CODE_LENGTH = 32;
             if (code.length !== CODE_LENGTH || !/^[A-Z0-9]{32}$/.test(code)) {
                 await sendMessage(sender, `⚠️ โค้ดไม่ถูกต้อง กรุณาส่งโค้ด ${CODE_LENGTH} ตัวอักษร (A-Z, 0-9)`);
-                return true;
+                return true; // Invalid format, handled
             }
             await sendMessage(sender, "⏳ กำลังตรวจสอบโค้ด...");
             const verificationResult = await verifyRedemptionCode(code);
@@ -1054,15 +1123,18 @@ async function handleCheckoutTextInput(sender, text) {
                 }
             } else {
                 await sendMessage(sender, `❌ ตรวจสอบโค้ดล้มเหลว: ${verificationResult.message}`);
+                // Do NOT cancel payment automatically here
             }
-            return true;
+            return true; // Handled the redeem code attempt
         }
-        return false;
+        // If text input received but not matching any specific step above
+        return false; // Indicate it wasn't handled by checkout text input logic specifically
+
     } catch (error) {
         console.error(`Error in handleCheckoutTextInput: ${error.message}`);
         await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อมูลชำระเงิน");
         await sendButtonTemplate(sender, "พบข้อผิดพลาด", [{ type: "postback", title: "❌ ยกเลิก", payload: "CANCEL_PAYMENT" }]);
-        return true;
+        return true; // Error occurred, but we handled it by sending messages
     }
 }
 async function handleCheckoutImageInput(sender, imageUrl) {
@@ -1080,13 +1152,14 @@ async function handleCheckoutImageInput(sender, imageUrl) {
             await completeOrder(sender, 'bank', confirmationData);
         } else {
             await sendMessage(sender, `❌ ตรวจสอบสลิปล้มเหลว: ${verificationResult.message}`);
+             // Do NOT cancel payment automatically here
         }
-        return true;
+        return true; // Handled slip image input
     } catch (error) {
         console.error(`Error in handleCheckoutImageInput: ${error.message}`);
         await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการประมวลผลสลิป");
         await sendButtonTemplate(sender, "พบข้อผิดพลาด", [{ type: "postback", title: "❌ ยกเลิก", payload: "CANCEL_PAYMENT" }]);
-        return true;
+        return true; // Error occurred, handled by sending messages
     }
 }
 // --- End Checkout Handling ---
@@ -1117,7 +1190,7 @@ async function verifyAngpaoLink(phoneToRedeemWith, voucherLink, expectedAmount) 
                 headers: {
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
-                    'User-Agent': 'FBShopBot/5.1.1'
+                    'User-Agent': 'FBShopBot/5.2.0' // Update User-Agent slightly
                  },
                 timeout: 25000
              }
@@ -1243,7 +1316,7 @@ async function verifyBankSlipXncly(sender, imageUrl, expectedAmount) {
         const response = await axios.post(checkUrl, formData, {
             headers: {
                 ...formData.getHeaders(),
-                'User-Agent': 'FBShopBot/5.1.1'
+                'User-Agent': 'FBShopBot/5.2.0' // Update User-Agent
              },
             timeout: 45000
         });
@@ -1333,16 +1406,16 @@ async function verifyRedemptionCode(code) {
 async function sendDeliveredItemData(sender, productName, deliveredData) {
     await sendMessage(sender, `🎁 สินค้า: ${productName}\n🔑 ข้อมูลของคุณคือ:\n--------------------`);
     if (deliveredData && String(deliveredData).trim()) {
-        const chunks = String(deliveredData).match(/[\s\S]{1,600}/g) || [];
+        const chunks = String(deliveredData).match(/[\s\S]{1,600}/g) || []; // Split into chunks <= 640 chars (FB limit)
         for(const chunk of chunks) {
             await sendMessage(sender, chunk);
-            await new Promise(resolve => setTimeout(resolve, 300));
+            await new Promise(resolve => setTimeout(resolve, 300)); // Small delay between chunks
         }
     } else {
         await sendMessage(sender, "⚠️ ไม่พบข้อมูลสำหรับสินค้านี้! กรุณาติดต่อแอดมิน");
     }
     await sendMessage(sender, `--------------------`);
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 500)); // Delay after sending item
 }
 async function completeOrder(sender, paymentMethod, paymentConfirmation) {
     let orderId = `ORD-${Date.now()}-${sender.slice(-4)}`;
@@ -1361,62 +1434,81 @@ async function completeOrder(sender, paymentMethod, paymentConfirmation) {
         const discountCodeApplied = user.checkoutState.discountCode || null;
         const discountAmountValue = user.checkoutState.discountAmount || 0;
         const wasAutoPromo = user.checkoutState.autoDiscountApplied === true;
-        let deliveredItemsData = [];
+        let deliveredItemsData = []; // Stores { productId, name, deliveredData: [item1, item2...] }
 
         let stockConsumptionError = false;
         let insufficientStockProducts = [];
+        // --- Critical Section: Consume Stock ---
         for (const item of orderItemsDeepCopy) {
             const productIndex = shopData.products.findIndex(p => p.id === item.productId);
             if (productIndex === -1) {
                 console.error(`FATAL: Product ${item.productId} (Name: ${item.name}) not found during order completion for ${sender} (Order ${orderId}).`);
                 stockConsumptionError = true;
                 insufficientStockProducts.push(`${item.name} (ไม่พบสินค้า!)`);
-                continue;
+                continue; // Skip to next item if product not found
             }
             const product = shopData.products[productIndex];
-            if (!Array.isArray(product.stockItems)) product.stockItems = [];
+            // Ensure stockItems is an array, initialize if not (data safety)
+            if (!Array.isArray(product.stockItems)) {
+                console.warn(`Product ${product.id} (${product.name}) stockItems was not an array. Initializing. Order ${orderId}.`);
+                product.stockItems = [];
+            }
 
             if (product.stockItems.length < item.quantity) {
                 console.error(`FATAL: Insufficient stock for ${product.name} (ID: ${product.id}). Needed ${item.quantity}, Have ${product.stockItems.length}. Order ${orderId} for ${sender}.`);
                 stockConsumptionError = true;
                 insufficientStockProducts.push(`${product.name} (มี ${product.stockItems.length} / ต้องการ ${item.quantity})`);
-                continue;
+                continue; // Skip to next item if insufficient stock
             }
 
             const itemsForThisProduct = [];
             for (let i = 0; i < item.quantity; i++) {
+                // Use shift() to remove and get the first item (FIFO-like consumption)
                 const consumedItem = product.stockItems.shift();
+                // IMPORTANT: Check if consumedItem is valid data
                 if (consumedItem === undefined || consumedItem === null || String(consumedItem).trim() === '') {
                     console.error(`FATAL: Consumed invalid stock item (undefined/null/empty) for ${product.name} (Index ${i}) for order ${orderId}. Stock data potentially corrupt.`);
+                    // Should we put the item back? Or halt completely? Halting seems safer.
                     stockConsumptionError = true;
                     insufficientStockProducts.push(`${product.name} (ข้อมูลสต็อกผิดพลาด)`);
-                    break;
+                    // Restore previously shifted items for THIS product if error occurs mid-loop? Complex. Halting is better.
+                    itemsForThisProduct.length = 0; // Clear partially collected items for this product on error
+                    break; // Break inner loop for this product
                 }
                 itemsForThisProduct.push(consumedItem);
             }
-             if (stockConsumptionError && itemsForThisProduct.length < item.quantity) {
-                 console.log(`Partially consumed items for ${product.name} will not be added to delivered data due to error.`);
-             } else if (!stockConsumptionError) {
+             // Only add to delivered data if NO error occurred for this product's loop
+             if (!stockConsumptionError || itemsForThisProduct.length === item.quantity) { // Ensure all items were collected successfully
                  deliveredItemsData.push({
                     productId: item.productId,
                     name: item.name,
-                    deliveredData: itemsForThisProduct
+                    deliveredData: itemsForThisProduct // Store the actual consumed data
                  });
+                 // Update stock count immediately after successful consumption for this product
                  product.stock = product.stockItems.length;
+                 product.updatedAt = new Date().toISOString(); // Mark update time
                  console.log(`Consumed ${itemsForThisProduct.length} stock items for ${product.name} (Order ${orderId}). Remaining: ${product.stock}`);
+             } else {
+                 console.log(`Partially consumed items for ${product.name} will not be added to delivered data due to error.`);
              }
 
-             if (stockConsumptionError) break;
+             if (stockConsumptionError) break; // Break outer loop if any error occurred
         }
+        // --- End Critical Section ---
 
+        // If any stock consumption error occurred, STOP before creating order/saving data
         if (stockConsumptionError) {
             console.error(`Order ${orderId} for ${sender} halted due to stock/product error(s): ${insufficientStockProducts.join(', ')}`);
+            // **Crucially, DO NOT saveShopData() here**, as stock might be partially consumed but order not created.
+            // Inform the user and potentially admin.
             await sendMessage(sender, `❌ เกิดข้อผิดพลาดร้ายแรงในการตัดสต็อกสินค้า!\n- ${insufficientStockProducts.join('\n- ')}\nคำสั่งซื้อของคุณยังไม่สำเร็จ โปรดติดต่อแอดมินทันทีพร้อมแจ้งปัญหา (รหัส ${orderId})`);
-            return;
+            // Do NOT clear checkout state here, user might need info or admin needs to intervene.
+            return; // Stop order completion
         }
 
         console.log(`Stock consumption successful for Order ${orderId}`);
 
+        // --- Update Discount Code Usage (if applicable) ---
         let discountUpdateError = false;
         if (discountCodeApplied && !wasAutoPromo) {
             const codeIndex = discountCodes.findIndex(dc => dc.code === discountCodeApplied);
@@ -1424,10 +1516,11 @@ async function completeOrder(sender, paymentMethod, paymentConfirmation) {
                 discountCodes[codeIndex].uses = (discountCodes[codeIndex].uses || 0) + 1;
                 console.log(`Incremented usage count for discount code ${discountCodeApplied} (Order ${orderId}). New count: ${discountCodes[codeIndex].uses}`);
                 try {
-                    saveDiscountCodes();
+                    saveDiscountCodes(); // Save discount usage *separately* first
                 } catch (err) {
                      console.error(`CRITICAL ERROR: Failed to save discount code usage update for ${discountCodeApplied} (Order ${orderId}):`, err);
-                     discountUpdateError = true;
+                     discountUpdateError = true; // Flag error but continue order
+                     // Inform user non-critically
                      await sendMessage(sender, "⚠️ เกิดปัญหาในการบันทึกการใช้ส่วนลดเล็กน้อย (แจ้งแอดมินได้หากต้องการ) แต่คำสั่งซื้อของคุณกำลังดำเนินการต่อ...");
                 }
             } else {
@@ -1435,10 +1528,11 @@ async function completeOrder(sender, paymentMethod, paymentConfirmation) {
             }
         }
 
+        // --- Create Order Record ---
         const newOrder = {
             id: orderId,
             userId: sender,
-            items: orderItemsDeepCopy.map(item => ({
+            items: orderItemsDeepCopy.map(item => ({ // Use the original cart structure for the order record
                 productId: item.productId,
                 name: item.name,
                 price: item.price,
@@ -1449,20 +1543,22 @@ async function completeOrder(sender, paymentMethod, paymentConfirmation) {
             discountAmount: discountAmountValue,
             finalAmount: user.checkoutState.finalAmount,
             paymentMethod: paymentMethod,
-            paymentStatus: 'paid',
-            paymentConfirmation: String(paymentConfirmation).substring(0, 500),
-            status: 'completed',
+            paymentStatus: 'paid', // Assume paid since verification passed
+            paymentConfirmation: String(paymentConfirmation).substring(0, 500), // Store confirmation (link/ref/code), limit length
+            status: 'completed', // Initial status
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
+            // Intentionally NOT storing the delivered stockItems data in the order record itself for brevity/security
         };
 
         shopData.orders.push(newOrder);
-        user.cart = [];
-        delete user.checkoutState;
-        saveShopData(); // Save ALL data (stock updates, order, user state)
+        user.cart = []; // Clear user cart
+        delete user.checkoutState; // Clear checkout state
+        saveShopData(); // Save ALL data (stock updates, order, user state) AT THE END
 
         console.log(`Order ${orderId} completed for user ${sender}. Payment: ${paymentMethod}. Discount: ${discountCodeApplied || 'None'}. Items: ${deliveredItemsData.map(i => i.name + 'x' + i.deliveredData.length).join(', ')}`);
 
+        // --- Send Confirmation and Delivered Items to User ---
         await sendMessage(sender, `🎉 ขอบคุณสำหรับการสั่งซื้อ!\nรหัสคำสั่งซื้อ: ${orderId}`);
         await sendMessage(sender, "✅ การชำระเงิน/ยืนยันโค้ดเรียบร้อย");
         if (discountAmountValue > 0) {
@@ -1472,8 +1568,9 @@ async function completeOrder(sender, paymentMethod, paymentConfirmation) {
         await sendMessage(sender, "🚚 กำลังจัดส่งสินค้า...");
         await sendTypingIndicator(sender);
 
+        // Iterate through the collected delivered data and send it
         for (const deliveredItem of deliveredItemsData) {
-             const combinedData = deliveredItem.deliveredData.join('\n');
+             const combinedData = deliveredItem.deliveredData.join('\n'); // Join multiple items of the same product with newlines
              await sendDeliveredItemData(sender, deliveredItem.name, combinedData);
         }
 
@@ -1487,6 +1584,7 @@ async function completeOrder(sender, paymentMethod, paymentConfirmation) {
     } catch (error) {
         console.error(`Error in completeOrder for user ${sender} (Order ${orderId || 'N/A'}): ${error.message}`, error.stack);
         await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดร้ายแรงในขั้นตอนสุดท้าย โปรดติดต่อแอดมินพร้อมแจ้งรหัสผู้ใช้ (PSID) และรหัสคำสั่งซื้อ (หากมี) เพื่อตรวจสอบ");
+        // Clean up user state on error during completion, if possible
         const user = getUserData(sender);
         if (user.checkoutState) { delete user.checkoutState; saveShopData(); }
     }
@@ -1499,6 +1597,8 @@ async function cancelPayment(sender) {
             delete user.checkoutState;
             saveShopData();
             await sendMessage(sender, "✅ ยกเลิกขั้นตอนการชำระเงิน/ใช้โค้ด/ส่วนลดแล้ว");
+            console.log(`User ${sender} cancelled checkout process from state: ${prevState}`);
+            // Show cart if not empty, otherwise show categories
             if (user.cart && user.cart.length > 0) {
                  await viewCart(sender);
              } else {
@@ -1520,15 +1620,15 @@ async function searchProducts(sender, searchTerm) {
         if (!searchTerm || searchTerm.trim().length < 2) return await sendMessage(sender, "กรุณาระบุคำค้นหาอย่างน้อย 2 ตัวอักษร");
         const searchTermLower = searchTerm.toLowerCase().trim();
         const results = shopData.products.filter(product => {
-            product.stock = Array.isArray(product.stockItems) ? product.stockItems.length : 0;
+            product.stock = Array.isArray(product.stockItems) ? product.stockItems.length : 0; // Refresh stock for check
             return (
-                product.stock > 0 &&
+                product.stock > 0 && // Only search available products
                 (
                     product.name.toLowerCase().includes(searchTermLower) ||
                     (product.description && product.description.toLowerCase().includes(searchTermLower)) ||
                     (product.language && product.language.toLowerCase().includes(searchTermLower)) ||
                     (product.category && product.category.toLowerCase().includes(searchTermLower)) ||
-                    product.id === searchTerm
+                    product.id === searchTerm // Allow searching by full ID
                 )
             );
         });
@@ -1542,7 +1642,7 @@ async function searchProducts(sender, searchTerm) {
         }
 
         await sendMessage(sender, `🔎 ผลการค้นหาสำหรับ "${searchTerm}" (${results.length} รายการ):`);
-        const elements = results.slice(0, 10).map(product => ({
+        const elements = results.slice(0, 10).map(product => ({ // Limit to 10 results (FB template limit)
             title: product.name,
             subtitle: `฿${product.price.toFixed(2)} | ${product.category} | เหลือ ${product.stock}`,
             image_url: product.imageUrl || "https://via.placeholder.com/300x200/EEE/777?text=Result",
@@ -1568,18 +1668,19 @@ async function searchProducts(sender, searchTerm) {
 }
 async function showFeaturedProducts(sender) {
     try {
+        // Refresh stock count before filtering/sorting
         shopData.products.forEach(p => {
             p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0;
         });
 
         const featuredProducts = shopData.products
-            .filter(p => p.stock > 0)
-            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-            .slice(0, 5);
+            .filter(p => p.stock > 0) // Only show in-stock products
+            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)) // Sort by newest first
+            .slice(0, 5); // Limit to 5 featured products
 
         if (featuredProducts.length === 0) {
             await sendMessage(sender, "ตอนนี้ยังไม่มีสินค้าแนะนำพิเศษ หรือสินค้าหมดชั่วคราว");
-            await showCategories(sender);
+            await showCategories(sender); // Fallback to categories if no featured products
             return;
         }
 
@@ -1629,10 +1730,14 @@ async function showHelp(sender) {
    2. ระบบจะตรวจสอบ **โปรโมชั่นอัตโนมัติ** (ถ้ามีและเข้าเงื่อนไข)
    3. หากไม่มีโปรฯ อัตโนมัติ: ระบบจะถามหา **โค้ดส่วนลด** (ถ้ามีให้พิมพ์ / ไม่มีให้กดข้าม)
    4. เลือกวิธีชำระ:
-      - โอนเงิน: ส่ง 'รูปสลิป' ที่ถูกต้องและยังไม่เคยใช้
+      - โอนเงิน: ส่ง 'รูปสลิป' ที่ถูกต้องและยังไม่เคยใช้ (ระบบตรวจสอบอัตโนมัติ)
       - Wallet: สร้างซองตามยอด แล้วส่ง 'ลิงก์ซองอั่งเปา' (ระบบจะกดรับซองเพื่อยืนยัน)
       - ใช้โค้ด: ส่ง 'โค้ดรับของ 32 หลัก'
    5. ระบบจะส่งสินค้าให้เมื่อตรวจสอบการชำระเงิน/โค้ดสำเร็จ
+
+🔹 **AI Chat (หากเปิดใช้งาน):**
+   - พิมพ์คำถามทั่วไป ระบบ AI อาจช่วยตอบได้
+   - หาก AI ตอบไม่ได้ หรือต้องการคุยกับคน กดปุ่มติดต่อแอดมิน
 
 ติดปัญหา หรือ ต้องการสอบถามเพิ่มเติม? 👇
         `;
@@ -1687,43 +1792,53 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (body.object === 'page') {
+        // Send 200 OK immediately to Facebook
         res.status(200).send('EVENT_RECEIVED');
 
+        // Process events asynchronously
         const processEntry = async (entry) => {
             if (!entry.messaging || !Array.isArray(entry.messaging)) return;
             for (const webhook_event of entry.messaging) {
                 if (!webhook_event || !webhook_event.sender || !webhook_event.sender.id) continue;
                 const sender_psid = webhook_event.sender.id;
 
+                // Ignore echoes from the bot itself
                 if (webhook_event.message?.is_echo) {
+                    // console.log(`Ignoring echo for ${sender_psid}`);
                     continue;
                 }
 
                 console.log(`--- Event --- Sender PSID: ${sender_psid}`);
 
                 try {
+                    // Optional: Mark message as seen (can be rate limited)
                     // await sendApiRequest({ url: 'https://graph.facebook.com/v19.0/me/messages', method: 'POST', json: { recipient: { id: sender_psid }, sender_action: 'mark_seen' } });
 
+                    // Determine event type and handle
                     if (webhook_event.message) {
                         await handleMessage(sender_psid, webhook_event.message);
                     } else if (webhook_event.postback) {
                         await handlePostback(sender_psid, webhook_event.postback);
                     } else if (webhook_event.read) {
-                        // Optional handling
+                        // console.log(`Message read event for ${sender_psid}`);
+                        // Optional: Handle read receipts if needed
                     } else if (webhook_event.delivery) {
-                        // Optional handling
+                        // console.log(`Message delivery event for ${sender_psid}`);
+                        // Optional: Handle delivery confirmations if needed
                     } else {
                          console.log(`Webhook received unknown event type for ${sender_psid}:`, webhook_event);
                     }
                 } catch (error) {
                     console.error(`Error processing event for ${sender_psid}:`, error);
+                    // Avoid spamming logs for users who blocked the bot
                     if (!(error?.error === 'USER_BLOCKED_OR_RESTRICTED' || (error.message && error.message.includes('USER_BLOCKED_OR_RESTRICTED')))) {
-                        // Only log/report non-block errors potentially
+                        // Log other potentially recoverable errors more verbosely if needed
                     }
                 }
             }
         };
 
+        // Process entries sequentially to maintain order if necessary, though FB usually sends one entry/batch
         try {
             for (const entry of body.entry) {
                  await processEntry(entry);
@@ -1733,6 +1848,7 @@ app.post('/webhook', async (req, res) => {
         }
 
     } else {
+        // Not a page event
         console.log("Webhook received non-page object:", body.object);
         res.sendStatus(404);
     }
@@ -1749,16 +1865,21 @@ async function handleMessage(sender_psid, received_message) {
         let handledInCheckout = false;
         const currentState = user.checkoutState.step;
 
+        // Always allow cancellation during checkout
+        if (received_message.text && ['ยกเลิก', 'cancel'].includes(received_message.text.trim().toLowerCase())) {
+            await cancelPayment(sender_psid);
+            return; // Stop further processing
+        }
+
+        // Handle text input based on checkout step
         if (received_message.text) {
-            if (['ยกเลิก', 'cancel'].includes(received_message.text.trim().toLowerCase())) {
-                await cancelPayment(sender_psid);
-                return;
-            }
             handledInCheckout = await handleCheckoutTextInput(sender_psid, received_message.text);
         }
+        // Handle image input for bank slip
         else if (currentState === 'awaiting_bank_slip' && received_message.attachments?.[0]?.type === 'image' && received_message.attachments[0].payload?.url) {
             handledInCheckout = await handleCheckoutImageInput(sender_psid, received_message.attachments[0].payload.url);
         }
+        // Handle potential Angpao link from fallback attachment (e.g., link share)
         else if (currentState === 'awaiting_angpao_link' && received_message.attachments?.[0]?.type === 'fallback' && received_message.attachments[0].payload?.url) {
             const fallbackUrl = received_message.attachments[0].payload.url;
             const ANGPAO_REGEX = /https:\/\/gift\.truemoney\.com\/campaign\/\?v=([a-zA-Z0-9]{35})/;
@@ -1768,10 +1889,12 @@ async function handleMessage(sender_psid, received_message) {
             }
         }
 
+        // If checkout logic handled the input (even if it was invalid for the step), stop here.
         if (handledInCheckout) {
             console.log(`Message handled by checkout logic for step: ${currentState}`);
             return;
         }
+        // If input received during checkout but NOT handled by specific step logic, remind user.
         else if (received_message.text || received_message.attachments) {
              console.log(`User ${sender_psid} sent unhandled input during checkout step: ${currentState}`);
              let reminderMsg = "กรุณาดำเนินการตามขั้นตอนปัจจุบัน หรือพิมพ์ 'ยกเลิก' เพื่อออก";
@@ -1781,22 +1904,23 @@ async function handleMessage(sender_psid, received_message) {
              else if (currentState === 'awaiting_redeem_code') reminderMsg = "กรุณาส่ง 'โค้ด 32 หลัก' ที่ถูกต้อง หรือพิมพ์ 'ยกเลิก'";
              else if (currentState === 'select_method') reminderMsg = "กรุณาเลือกวิธีการชำระเงินจากปุ่มด้านบน หรือพิมพ์ 'ยกเลิก'";
              await sendMessage(sender_psid, reminderMsg);
-             return;
+             return; // Stop further processing
         }
     }
     // --- END Checkout Input Handling ---
 
-    // --- Priority 2: Quick Replies ---
+    // --- Priority 2: Quick Replies (if NOT handled by checkout) ---
     if (received_message.quick_reply?.payload) {
         console.log(`Quick Reply Payload: ${received_message.quick_reply.payload}`);
         await handlePostbackPayload(sender_psid, received_message.quick_reply.payload);
         return;
     }
 
-    // --- Priority 3: General Attachments ---
+    // --- Priority 3: General Attachments (if NOT handled by checkout) ---
     if (received_message.attachments?.length > 0) {
         const attachmentType = received_message.attachments[0].type;
         console.log(`Received unhandled attachment type: ${attachmentType} from ${sender_psid}`);
+        // Optionally provide feedback for attachments not handled elsewhere
         if (attachmentType === 'sticker') {
              // await sendMessage(sender_psid, "สติกเกอร์น่ารัก!");
         } else if (attachmentType === 'location') {
@@ -1804,46 +1928,91 @@ async function handleMessage(sender_psid, received_message) {
         } else if (attachmentType === 'audio' || attachmentType === 'video' || attachmentType === 'file') {
              await sendMessage(sender_psid, `ขอบคุณสำหรับไฟล์ ${attachmentType} ครับ 👍 แต่ระบบยังไม่รองรับไฟล์ประเภทนี้โดยตรง`);
         } else {
-             await sendMessage(sender_psid, `ได้รับ ${attachmentType} แล้วครับ 👍`);
+             // Generic ack for other types like fallback, etc. if not handled earlier
+             // await sendMessage(sender_psid, `ได้รับ ${attachmentType} แล้วครับ 👍`);
         }
-        return;
+        return; // Stop processing after handling attachment
     }
 
-    // --- Priority 4: Text Commands (Only if NOT in checkout state) ---
+    // --- Priority 4: Text Commands & AI Chat (Only if NOT in checkout state) ---
     if (received_message.text) {
         let text = received_message.text.trim();
         const textLower = text.toLowerCase();
-        console.log(`Received text command from ${sender_psid}: "${text}"`);
+        console.log(`Received text command/query from ${sender_psid}: "${text}"`);
 
+        let commandHandled = false;
+
+        // Check standard commands first
         if (['hi', 'hello', 'สวัสดี', 'หวัดดี', 'ดี', 'hey'].includes(textLower)) {
             await sendMessage(sender_psid, "สวัสดีครับ! พิมพ์ 'สินค้า' เพื่อดูรายการ หรือ 'ช่วยเหลือ' เพื่อดูคำสั่งครับ 😊");
-        } else if (['สินค้า', 'shop', 'menu', 'เมนู', 'product', 'products'].includes(textLower)) await showCategories(sender_psid);
-        else if (['ตะกร้า', 'cart', 'ดูตะกร้า'].includes(textLower)) await viewCart(sender_psid);
-        else if (['ชำระเงิน', 'checkout', 'จ่ายเงิน', 'payment'].includes(textLower)) await checkout(sender_psid);
-        else if (['ช่วยเหลือ', 'help', 'คำสั่ง', 'command', 'commands'].includes(textLower)) await showHelp(sender_psid);
-        else if (['แนะนำ', 'featured', 'มาใหม่', 'recommend'].includes(textLower)) await showFeaturedProducts(sender_psid);
-        else if (['ล้างตะกร้า', 'clear cart'].includes(textLower)) await clearCart(sender_psid);
-        else if (['ยกเลิก', 'cancel'].includes(textLower)) await sendMessage(sender_psid, "หากต้องการยกเลิกขั้นตอนการชำระเงิน กรุณาเริ่มขั้นตอนนั้นก่อน แล้วพิมพ์ 'ยกเลิก' หรือกดปุ่มยกเลิกครับ");
-        else if (textLower.startsWith('ค้นหา ') || textLower.startsWith('search ')) {
+            commandHandled = true;
+        } else if (['สินค้า', 'shop', 'menu', 'เมนู', 'product', 'products'].includes(textLower)) {
+            await showCategories(sender_psid);
+            commandHandled = true;
+        } else if (['ตะกร้า', 'cart', 'ดูตะกร้า'].includes(textLower)) {
+            await viewCart(sender_psid);
+            commandHandled = true;
+        } else if (['ชำระเงิน', 'checkout', 'จ่ายเงิน', 'payment'].includes(textLower)) {
+             await checkout(sender_psid);
+             commandHandled = true;
+        } else if (['ช่วยเหลือ', 'help', 'คำสั่ง', 'command', 'commands'].includes(textLower)) {
+            await showHelp(sender_psid);
+            commandHandled = true;
+        } else if (['แนะนำ', 'featured', 'มาใหม่', 'recommend'].includes(textLower)) {
+            await showFeaturedProducts(sender_psid);
+            commandHandled = true;
+        } else if (['ล้างตะกร้า', 'clear cart'].includes(textLower)) {
+            await clearCart(sender_psid);
+            commandHandled = true;
+        } else if (['ยกเลิก', 'cancel'].includes(textLower)) {
+            // Explicit cancel command when *not* in checkout
+            await sendMessage(sender_psid, "ไม่ได้อยู่ในขั้นตอนใดๆ ที่ต้องยกเลิกครับ หากต้องการยกเลิกการชำระเงิน ให้เริ่มชำระเงินก่อนแล้วพิมพ์ 'ยกเลิก'");
+            commandHandled = true;
+        } else if (textLower.startsWith('ค้นหา ') || textLower.startsWith('search ')) {
             const searchTerm = text.substring(textLower.indexOf(' ') + 1).trim();
             await searchProducts(sender_psid, searchTerm);
+            commandHandled = true;
         } else if (['ขอบคุณ', 'ขอบใจ', 'thanks', 'thank you', 'ty'].includes(textLower)) {
             await sendMessage(sender_psid, "ยินดีเสมอครับ! 😊");
+            commandHandled = true;
         }
-        else {
+
+        // --- Priority 5: AI Chat Fallback ---
+        if (!commandHandled && loadedConfig.aiChatEnabled) {
+            console.log(`Text "${text}" not a known command, attempting AI response...`);
+            await sendTypingIndicator(sender_psid);
+            const aiReply = await getAIResponse(text);
+            await sendTypingIndicator(sender_psid, 'typing_off');
+
+            if (aiReply) {
+                await sendMessage(sender_psid, aiReply);
+                console.log("AI response sent successfully.");
+            } else {
+                // AI is enabled but failed or returned no response
+                console.warn("AI is enabled but failed to provide a response.");
+                await sendMessage(sender_psid, `ขออภัย ระบบ AI ไม่สามารถตอบคำถามนี้ได้ในขณะนี้ ลองถามใหม่อีกครั้ง หรือพิมพ์ 'ช่วยเหลือ' เพื่อดูคำสั่งอื่นๆ ครับ`);
+            }
+             commandHandled = true; // Mark as handled (either by AI or AI failure message)
+        }
+
+        // Final Fallback if no command and AI is disabled or failed silently (shouldn't happen with above logic)
+        if (!commandHandled) {
             await sendMessage(sender_psid, `ขออภัย ไม่เข้าใจคำสั่ง "${text}"\nลองพิมพ์ 'ช่วยเหลือ' เพื่อดูคำสั่งทั้งหมดนะครับ`);
         }
-        return;
+
+        return; // End text message handling
     }
 
+    // Fallback for unhandled message types (should be rare)
     console.log(`Received unhandled message content from ${sender_psid}:`, JSON.stringify(received_message));
 }
 async function handlePostback(sender_psid, received_postback) {
     let payload = received_postback.payload;
     let referral = received_postback.referral;
     if (referral) {
+        // Handle referral data if needed, e.g., tracking entry points
         console.log(`Handling postback with referral from ${sender_psid}, Ref: ${JSON.stringify(referral)} Payload: ${payload}`);
-        if (!payload) payload = 'GET_STARTED';
+        if (!payload) payload = 'GET_STARTED'; // Treat referral without payload as get started
     } else {
         console.log(`Handling postback from ${sender_psid}, Payload: ${payload}`);
     }
@@ -1856,28 +2025,33 @@ async function handlePostbackPayload(sender_psid, payload) {
     console.log(`Processing Payload: "${payload}" for User: ${sender_psid}, Checkout State: ${user.checkoutState?.step || 'None'}`);
 
     try {
+        // --- State Validation for Checkout Actions ---
         const requiresCheckoutState = [
             'APPLY_DISCOUNT_PROMPT', 'SKIP_DISCOUNT', 'PAYMENT_ANGPAO',
             'PAYMENT_BANK', 'PAYMENT_REDEEM_CODE', 'CANCEL_PAYMENT'
         ];
         const isCheckoutAction = requiresCheckoutState.includes(payload);
+        const isDiscountPromptAction = ['APPLY_DISCOUNT_PROMPT', 'SKIP_DISCOUNT'].includes(payload);
+        const isPaymentMethodSelection = payload.startsWith('PAYMENT_');
 
         if (isCheckoutAction && !user.checkoutState) {
-            console.warn(`Ignoring stale checkout button "${payload}" from ${sender_psid}.`);
-            await sendMessage(sender_psid, "ปุ่มนี้อาจเก่าเกินไป หากต้องการเริ่มชำระเงิน กด 'ดูตะกร้า' แล้วกด 'ชำระเงิน' ครับ");
+            console.warn(`Ignoring stale checkout button "${payload}" from ${sender_psid}. User not in checkout state.`);
+            await sendMessage(sender_psid, "ปุ่มนี้อาจเก่าเกินไป หรือคุณไม่ได้อยู่ในขั้นตอนชำระเงิน หากต้องการเริ่มชำระเงิน กด 'ดูตะกร้า' แล้วกด 'ชำระเงิน' ครับ");
             return;
         }
 
-         if (payload.startsWith('PAYMENT_') && user.checkoutState?.step !== 'select_method') {
-             console.warn(`Ignoring payment button "${payload}" from ${sender_psid} in wrong state (${user.checkoutState?.step}).`);
+         if (isPaymentMethodSelection && user.checkoutState?.step !== 'select_method') {
+             console.warn(`Ignoring payment button "${payload}" from ${sender_psid} in wrong state (${user.checkoutState?.step}). Expected 'select_method'.`);
              await sendMessage(sender_psid, "กรุณาทำตามขั้นตอนปัจจุบันก่อนเลือกวิธีชำระเงินครับ (หรือกด 'ยกเลิก' เพื่อเริ่มใหม่)");
              return;
          }
-         if ((payload === 'APPLY_DISCOUNT_PROMPT' || payload === 'SKIP_DISCOUNT')) {
+         if (isDiscountPromptAction) {
             if (!user.checkoutState || !['awaiting_discount_or_payment', 'awaiting_discount_code'].includes(user.checkoutState.step)) {
-                console.warn(`Ignoring discount button "${payload}" from ${sender_psid} in invalid state (${user.checkoutState?.step}).`);
+                console.warn(`Ignoring discount button "${payload}" from ${sender_psid} in invalid state (${user.checkoutState?.step}). Expected 'awaiting_discount_or_payment' or 'awaiting_discount_code'.`);
                 if (user.checkoutState?.autoDiscountApplied) {
                      await sendMessage(sender_psid, "ระบบได้ใช้โปรโมชั่นอัตโนมัติแล้ว ไม่สามารถใช้โค้ดอื่นได้ครับ");
+                } else if (user.checkoutState?.step === 'select_method') {
+                     await sendMessage(sender_psid, "คุณได้ข้ามขั้นตอนส่วนลดแล้ว กรุณาเลือกวิธีชำระเงิน หรือ 'ยกเลิก' เพื่อเริ่มใหม่");
                 } else {
                      await sendMessage(sender_psid, "ไม่สามารถใช้ส่วนลดในขั้นตอนนี้ได้ (หรือปุ่มอาจเก่าเกินไป)");
                 }
@@ -1886,65 +2060,93 @@ async function handlePostbackPayload(sender_psid, payload) {
          }
 
         // --- Payload Routing ---
-        if (payload === 'GET_STARTED') {
-            await sendImageMessage(sender_psid, loadedConfig.welcomeGif);
-            await sendMessage(sender_psid, "สวัสดีครับ! ยินดีต้อนรับสู่ร้านค้า 😊");
-            await showCategories(sender_psid);
-        }
-        else if (payload === 'SHOW_CATEGORIES') await showCategories(sender_psid);
-        else if (payload.startsWith('CATEGORY_')) {
-            const categoryName = payload.substring('CATEGORY_'.length);
-            await showProductsByCategory(sender_psid, categoryName, 0);
-        }
-        else if (payload.startsWith('MORE_PRODUCTS_')) {
-            const parts = payload.substring('MORE_PRODUCTS_'.length).split('_');
-            const page = parseInt(parts.pop(), 10);
-            const categoryName = parts.join('_');
-            if (!isNaN(page) && page >= 0 && categoryName) {
-                await showProductsByCategory(sender_psid, categoryName, page);
-            } else {
-                console.error(`Invalid MORE_PRODUCTS payload format: "${payload}"`);
-                await sendMessage(sender_psid, "เกิดข้อผิดพลาดในการโหลดหน้าถัดไป");
-            }
-        }
-        else if (payload.startsWith('PRODUCT_VIEW_')) {
-            const productId = payload.substring('PRODUCT_VIEW_'.length);
-            await showProductDetail(sender_psid, productId);
-        }
-        else if (payload === 'CART_VIEW') await viewCart(sender_psid);
-        else if (payload === 'CART_CLEAR') await clearCart(sender_psid);
-        else if (payload.startsWith('PRODUCT_ADD_TO_CART_')) {
-            const productId = payload.substring('PRODUCT_ADD_TO_CART_'.length);
-            await addToCart(sender_psid, productId);
-        } else if (payload.startsWith('CART_REMOVE_')) {
-            const productId = payload.substring('CART_REMOVE_'.length);
-            await removeFromCart(sender_psid, productId);
-        }
-        else if (payload === 'CHECKOUT') await checkout(sender_psid);
-        else if (payload === 'APPLY_DISCOUNT_PROMPT') await promptForDiscountCode(sender_psid);
-        else if (payload === 'SKIP_DISCOUNT') await skipDiscountAndProceed(sender_psid);
-        else if (payload === 'PAYMENT_ANGPAO') await processPaymentMethod(sender_psid, 'angpao');
-        else if (payload === 'PAYMENT_BANK') await processPaymentMethod(sender_psid, 'bank');
-        else if (payload === 'PAYMENT_REDEEM_CODE') await processPaymentMethod(sender_psid, 'redeem_code');
-        else if (payload === 'CANCEL_PAYMENT') await cancelPayment(sender_psid);
-        else if (payload === 'HELP') await showHelp(sender_psid);
-        else if (payload === 'FEATURED_PRODUCTS') await showFeaturedProducts(sender_psid);
-        else {
-            console.warn(`Unhandled payload received: "${payload}" from ${sender_psid}`);
-            if (!isCheckoutAction) {
-                 await sendMessage(sender_psid, "ขออภัย ไม่รู้จักคำสั่งนี้ หรืออาจเป็นปุ่มเก่า");
-            }
+        // Use a switch for better organization
+        switch (payload) {
+            case 'GET_STARTED':
+                await sendImageMessage(sender_psid, loadedConfig.welcomeGif);
+                await sendMessage(sender_psid, "สวัสดีครับ! ยินดีต้อนรับสู่ร้านค้า 😊");
+                await showCategories(sender_psid);
+                break;
+            case 'SHOW_CATEGORIES':
+                await showCategories(sender_psid);
+                break;
+            case 'CART_VIEW':
+                await viewCart(sender_psid);
+                break;
+            case 'CART_CLEAR':
+                await clearCart(sender_psid);
+                break;
+            case 'CHECKOUT':
+                await checkout(sender_psid);
+                break;
+            case 'APPLY_DISCOUNT_PROMPT':
+                await promptForDiscountCode(sender_psid);
+                break;
+            case 'SKIP_DISCOUNT':
+                await skipDiscountAndProceed(sender_psid);
+                break;
+            case 'PAYMENT_ANGPAO':
+                await processPaymentMethod(sender_psid, 'angpao');
+                break;
+            case 'PAYMENT_BANK':
+                await processPaymentMethod(sender_psid, 'bank');
+                break;
+            case 'PAYMENT_REDEEM_CODE':
+                await processPaymentMethod(sender_psid, 'redeem_code');
+                break;
+            case 'CANCEL_PAYMENT':
+                await cancelPayment(sender_psid);
+                break;
+            case 'HELP':
+                await showHelp(sender_psid);
+                break;
+            case 'FEATURED_PRODUCTS':
+                await showFeaturedProducts(sender_psid);
+                break;
+            default:
+                // Handle dynamic payloads (like CATEGORY_, PRODUCT_VIEW_, etc.)
+                if (payload.startsWith('CATEGORY_')) {
+                    const categoryName = payload.substring('CATEGORY_'.length);
+                    await showProductsByCategory(sender_psid, categoryName, 0);
+                } else if (payload.startsWith('MORE_PRODUCTS_')) {
+                    const parts = payload.substring('MORE_PRODUCTS_'.length).split('_');
+                    const page = parseInt(parts.pop(), 10);
+                    const categoryName = parts.join('_');
+                    if (!isNaN(page) && page >= 0 && categoryName) {
+                        await showProductsByCategory(sender_psid, categoryName, page);
+                    } else {
+                        console.error(`Invalid MORE_PRODUCTS payload format: "${payload}"`);
+                        await sendMessage(sender_psid, "เกิดข้อผิดพลาดในการโหลดหน้าถัดไป");
+                    }
+                } else if (payload.startsWith('PRODUCT_VIEW_')) {
+                    const productId = payload.substring('PRODUCT_VIEW_'.length);
+                    await showProductDetail(sender_psid, productId);
+                } else if (payload.startsWith('PRODUCT_ADD_TO_CART_')) {
+                    const productId = payload.substring('PRODUCT_ADD_TO_CART_'.length);
+                    await addToCart(sender_psid, productId);
+                } else if (payload.startsWith('CART_REMOVE_')) {
+                    const productId = payload.substring('CART_REMOVE_'.length);
+                    await removeFromCart(sender_psid, productId);
+                } else {
+                    console.warn(`Unhandled payload received: "${payload}" from ${sender_psid}`);
+                     // Avoid sending generic error if it was likely a stale checkout button
+                     if (!isCheckoutAction) {
+                          await sendMessage(sender_psid, "ขออภัย ไม่รู้จักคำสั่งนี้ หรืออาจเป็นปุ่มเก่า");
+                     }
+                }
+                break;
         }
     } catch (error) {
         console.error(`Error handling payload "${payload}" for ${sender_psid}:`, error);
         await sendMessage(sender_psid, "ขออภัย เกิดข้อผิดพลาด โปรดลองอีกครั้ง หรือติดต่อแอดมิน");
+        // Attempt recovery based on state
         const currentUser = getUserData(sender_psid);
         if (currentUser.checkoutState) {
              console.log(`Attempting to cancel payment state for user ${sender_psid} after error during payload handling.`);
-             await cancelPayment(sender_psid);
+             await cancelPayment(sender_psid); // Try to cancel checkout if error occurred during it
         } else {
              console.log(`Showing categories for user ${sender_psid} after error during non-checkout payload handling.`);
-             await showCategories(sender_psid);
+             await showCategories(sender_psid); // Fallback to categories otherwise
         }
     }
 }
@@ -1954,7 +2156,8 @@ async function handlePostbackPayload(sender_psid, payload) {
 function validateImageUrl(url) {
     if (!url || typeof url !== 'string') return false;
     const trimmedUrl = url.trim();
-    const pattern = /^https:\/\/.+\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i;
+    // Allow http or https, various image formats, optional query params
+    const pattern = /^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i;
     return pattern.test(trimmedUrl);
 }
 
@@ -1966,6 +2169,7 @@ if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
 // --- Admin Routes ---
 app.get('/admin', (req, res) => {
     try {
+        // Ensure stock counts are fresh for display
         shopData.products.forEach(p => { p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0; });
 
         const completedOrders = shopData.orders.filter(o => o.status === 'completed');
@@ -1989,6 +2193,7 @@ app.get('/admin', (req, res) => {
             autoPromotionStatus: loadedConfig.autoPromotionEnabled
                 ? `เปิดใช้งาน (${loadedConfig.autoPromotionPercentage}% เมื่อซื้อครบ ${loadedConfig.autoPromotionMinPurchase.toFixed(2)}฿)`
                 : 'ปิดใช้งาน',
+            aiChatStatus: loadedConfig.aiChatEnabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน', // AI Status
             recentOrders: [...shopData.orders]
                 .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
                 .slice(0, 5)
@@ -2053,7 +2258,7 @@ app.get('/admin/settings', async (req, res) => {
     try {
         const connectionCheck = await checkFacebookConnection();
         res.render('settings', {
-            config: { ...loadedConfig },
+            config: { ...loadedConfig }, // Pass a copy
             message: req.query.message,
             error: req.query.error,
             connectionStatus: connectionCheck,
@@ -2083,6 +2288,7 @@ app.post('/admin/settings/save', (req, res) => {
         loadedConfig.welcomeGif = req.body.welcomeGif?.trim() || DEFAULT_CONFIG.welcomeGif;
         if (!loadedConfig.fbVerifyToken) errors.push("Facebook Verify Token ห้ามว่าง");
         if (loadedConfig.adminContactLink && !loadedConfig.adminContactLink.startsWith('https://m.me/')) errors.push("รูปแบบ ลิงก์ติดต่อแอดมิน ไม่ถูกต้อง (ควรเป็น https://m.me/...)");
+        if (loadedConfig.welcomeGif && !validateImageUrl(loadedConfig.welcomeGif)) errors.push("รูปแบบ URL Welcome GIF ไม่ถูกต้อง");
 
         // --- Wallet ---
         loadedConfig.walletPhone = req.body.walletPhone?.trim() || '';
@@ -2090,21 +2296,26 @@ app.post('/admin/settings/save', (req, res) => {
         if (!loadedConfig.walletPhone || !/^[0-9]{10}$/.test(loadedConfig.walletPhone)) {
             errors.push("เบอร์ Wallet ร้านค้า (สำหรับรับซอง) ต้องเป็น 10 หลัก และห้ามว่าง");
         }
+        if (loadedConfig.walletImage && !validateImageUrl(loadedConfig.walletImage)) errors.push("รูปแบบ URL รูป Wallet ไม่ถูกต้อง");
+
 
         // --- Bank ---
         loadedConfig.bankAccountDetails = req.body.bankAccountDetails?.trim() || '';
         loadedConfig.bankImage = req.body.bankImage?.trim() || DEFAULT_CONFIG.bankImage;
         if (loadedConfig.bankAccountDetails.length < 10) errors.push("ข้อมูลบัญชีธนาคาร สั้นเกินไป (ต้องระบุ ธนาคาร, เลข, ชื่อ)");
+        if (loadedConfig.bankImage && !validateImageUrl(loadedConfig.bankImage)) errors.push("รูปแบบ URL รูป Bank ไม่ถูกต้อง");
 
         // --- Xncly ---
         loadedConfig.xnclyClientIdSecret = req.body.xnclyClientIdSecret?.trim() || '';
         loadedConfig.xnclyCheckUrl = req.body.xnclyCheckUrl?.trim() || DEFAULT_CONFIG.xnclyCheckUrl;
-        if (!loadedConfig.xnclyClientIdSecret.includes(':')) errors.push("รูปแบบ Xncly ClientID:Secret ไม่ถูกต้อง");
+        if (loadedConfig.xnclyClientIdSecret && !loadedConfig.xnclyClientIdSecret.includes(':')) errors.push("รูปแบบ Xncly ClientID:Secret ไม่ถูกต้อง"); // Allow empty if not used
         if (!loadedConfig.xnclyCheckUrl.startsWith('http')) errors.push("รูปแบบ Xncly Check URL ไม่ถูกต้อง");
 
         // --- Images ---
         loadedConfig.codeRedemptionImage = req.body.codeRedemptionImage?.trim() || DEFAULT_CONFIG.codeRedemptionImage;
         loadedConfig.discountImage = req.body.discountImage?.trim() || DEFAULT_CONFIG.discountImage;
+        if (loadedConfig.codeRedemptionImage && !validateImageUrl(loadedConfig.codeRedemptionImage)) errors.push("รูปแบบ URL รูป Code Redemption ไม่ถูกต้อง");
+        if (loadedConfig.discountImage && !validateImageUrl(loadedConfig.discountImage)) errors.push("รูปแบบ URL รูป Discount Feature ไม่ถูกต้อง");
 
         // --- Auto Promotion ---
         loadedConfig.autoPromotionEnabled = req.body.autoPromotionEnabled === 'on';
@@ -2136,6 +2347,18 @@ app.post('/admin/settings/save', (req, res) => {
             restartNeeded = true;
         }
 
+        // --- AI Chat Settings ---
+        loadedConfig.aiChatEnabled = req.body.aiChatEnabled === 'on';
+        loadedConfig.aiApiKey = req.body.aiApiKey?.trim() || '';
+        loadedConfig.aiApiUrl = req.body.aiApiUrl?.trim() || '';
+
+        if (loadedConfig.aiChatEnabled && (!loadedConfig.aiApiKey || !loadedConfig.aiApiUrl)) {
+            errors.push("หากเปิดใช้งาน AI Chat ต้องระบุ AI API Key และ AI API URL"); // Correct validation
+        }
+         if (loadedConfig.aiApiUrl && !loadedConfig.aiApiUrl.startsWith('http')) {
+             errors.push("รูปแบบ AI API URL ไม่ถูกต้อง");
+         }
+
         // --- Final Check & Save ---
         if (errors.length > 0) {
              throw new Error(errors.join('\\n')); // Use \\n for multi-line alert in EJS
@@ -2149,14 +2372,18 @@ app.post('/admin/settings/save', (req, res) => {
             console.warn("Server configuration changed. RESTART REQUIRED for changes to take effect.");
         }
         if (loadedConfig.fbVerifyToken !== oldVerifyToken || loadedConfig.fbPageAccessToken !== oldAccessToken) {
-            message += " (Token เปลี่ยนแปลงแล้ว ลองตรวจสอบสถานะเชื่อมต่ออีกครั้ง)";
+            message += " (Token Facebook เปลี่ยนแปลงแล้ว กรุณาตรวจสอบการเชื่อมต่อ)";
         }
         console.log(`Server Settings Saved: Port=${loadedConfig.serverPort}, HTTPS=${loadedConfig.enableHttps}, Key=${loadedConfig.sslKeyPath}, Cert=${loadedConfig.sslCertPath}`);
         console.log(`Auto Promotion status saved: Enabled=${loadedConfig.autoPromotionEnabled}, Percentage=${loadedConfig.autoPromotionPercentage}, MinPurchase=${loadedConfig.autoPromotionMinPurchase}`);
+        console.log(`AI Chat status saved: Enabled=${loadedConfig.aiChatEnabled}, Key=${loadedConfig.aiApiKey ? '******' : 'None'}, URL=${loadedConfig.aiApiUrl}`);
+
 
         res.redirect('/admin/settings?message=' + encodeURIComponent(message));
     } catch (error) {
         console.error("Error saving settings:", error);
+        // Reload config to revert potential partial changes before redirecting
+        loadConfig();
         res.redirect('/admin/settings?error=' + encodeURIComponent('ผิดพลาด:\\n' + error.message));
     }
 });
@@ -2193,7 +2420,7 @@ app.post('/admin/products/add', (req, res) => {
 
         const parsedPrice = parseFloat(price);
         if (isNaN(parsedPrice) || parsedPrice < 0) errors.push('ราคาไม่ถูกต้อง');
-        if (imageUrl && !validateImageUrl(imageUrl)) errors.push('รูปแบบ URL รูปภาพไม่ถูกต้อง (ต้องเป็น https และลงท้ายด้วย .jpg, .png, .gif, .webp)');
+        if (imageUrl && !validateImageUrl(imageUrl)) errors.push('รูปแบบ URL รูปภาพไม่ถูกต้อง (ต้องเป็น http/https และลงท้ายด้วย .jpg, .png, .gif, .webp etc.)');
         if (category && !shopData.categories.some(cat => cat.name === category)) errors.push('หมวดหมู่ที่เลือกไม่มีอยู่จริง');
 
         const stockItems = stockItemsInput ? stockItemsInput.split('\n').map(line => line.trim()).filter(line => line.length > 0) : [];
@@ -2230,7 +2457,6 @@ app.post('/admin/products/add', (req, res) => {
         res.redirect(`/admin/products?error=${encodeURIComponent(errorMsg)}`);
     }
 });
-// This is the route handler that seemed problematic
 app.post('/admin/products/edit/:id', (req, res) => {
      let errorMsg = '', successMsg = '';
      const { id } = req.params;
@@ -2271,6 +2497,7 @@ app.post('/admin/products/edit/:id', (req, res) => {
             console.warn(`Product ${id} stockItems was not an array, initializing.`);
             currentProduct.stockItems = [];
         }
+        // Add new items to the END of the existing stock
         const updatedStockItems = [...currentProduct.stockItems, ...itemsToAdd];
 
         // Update product fields
@@ -2313,8 +2540,8 @@ app.post('/admin/products/stock/delete/:productId/:itemIndex', (req, res) => {
         }
 
         const removedItem = product.stockItems.splice(index, 1)[0];
-        product.stock = product.stockItems.length;
-        product.updatedAt = new Date().toISOString();
+        product.stock = product.stockItems.length; // Update count
+        product.updatedAt = new Date().toISOString(); // Mark update
         saveShopData();
 
         successMsg = `ลบสต็อกลำดับที่ ${index + 1} ("${String(removedItem).substring(0, 15)}...") จากสินค้า ${product.name} สำเร็จ`;
@@ -2334,7 +2561,7 @@ app.post('/admin/products/delete/:id', (req, res) => {
         if (productIndex === -1) throw new Error('ไม่พบสินค้าที่ต้องการลบ');
 
         const productName = shopData.products[productIndex].name;
-        shopData.products.splice(productIndex, 1);
+        shopData.products.splice(productIndex, 1); // Remove the product
 
         saveShopData();
         successMsg = `ลบสินค้า "${productName}" (ID: ${id}) เรียบร้อยแล้ว.`;
@@ -2359,6 +2586,7 @@ app.get('/admin/categories', (req, res) => {
         let error = req.query.error;
         const categoryName = req.query.categoryName;
 
+        // Custom error message for delete failure
         if (error === 'delete_failed_in_use') {
             const catData = categoriesWithCount.find(c => c.name === decodeURIComponent(categoryName || ''));
             error = `ลบไม่สำเร็จ! ไม่สามารถลบหมวดหมู่ "${decodeURIComponent(categoryName || '')}" ได้เนื่องจากมีสินค้า (${catData?.productCount || '?'}) ใช้งานอยู่ กรุณาย้ายสินค้าออกก่อน`;
@@ -2385,7 +2613,7 @@ app.post('/admin/categories/add', (req, res) => {
             imageUrl: imageUrl ? imageUrl.trim() : '',
             description: description ? description.trim() : ''
         });
-        shopData.categories.sort((a, b) => a.name.localeCompare(b.name));
+        shopData.categories.sort((a, b) => a.name.localeCompare(b.name)); // Keep sorted
         saveShopData();
         successMsg = `เพิ่มหมวดหมู่ "${trimmedName}" สำเร็จ.`;
         console.log(`Admin: ${successMsg}`);
@@ -2404,6 +2632,7 @@ app.post('/admin/categories/edit', (req, res) => {
         if (!newName || !newName.trim()) throw new Error('ชื่อใหม่ห้ามว่าง');
         const trimmedNewName = newName.trim();
 
+        // Check for name collision only if the name actually changed (case-insensitive)
         if (trimmedNewName.toLowerCase() !== originalName.toLowerCase() &&
             shopData.categories.some(cat => cat.name.toLowerCase() === trimmedNewName.toLowerCase())) {
             throw new Error(`ชื่อหมวดหมู่ใหม่ "${trimmedNewName}" ซ้ำกับหมวดหมู่อื่น`);
@@ -2413,26 +2642,27 @@ app.post('/admin/categories/edit', (req, res) => {
         const categoryIndex = shopData.categories.findIndex(cat => cat.name === originalName);
         if (categoryIndex === -1) throw new Error('ไม่พบหมวดหมู่เดิมที่ต้องการแก้ไข');
 
-        const oldName = shopData.categories[categoryIndex].name;
+        const oldName = shopData.categories[categoryIndex].name; // Store old name for product update check
         shopData.categories[categoryIndex].name = trimmedNewName;
-        shopData.categories[categoryIndex].imageUrl = imageUrl ? imageUrl.trim() : (shopData.categories[categoryIndex].imageUrl || '');
-        shopData.categories[categoryIndex].description = description ? description.trim() : (shopData.categories[categoryIndex].description || '');
+        shopData.categories[categoryIndex].imageUrl = imageUrl ? imageUrl.trim() : (shopData.categories[categoryIndex].imageUrl || ''); // Keep old if new is empty
+        shopData.categories[categoryIndex].description = description ? description.trim() : (shopData.categories[categoryIndex].description || ''); // Keep old if new is empty
 
         let productsUpdated = 0;
+        // Update products only if the name actually changed
         if (trimmedNewName !== oldName) {
             shopData.products.forEach(product => {
                 if (product.category === oldName) {
                     product.category = trimmedNewName;
-                    product.updatedAt = new Date().toISOString();
+                    product.updatedAt = new Date().toISOString(); // Mark product as updated
                     productsUpdated++;
                 }
             });
-             shopData.categories.sort((a, b) => a.name.localeCompare(b.name));
+             shopData.categories.sort((a, b) => a.name.localeCompare(b.name)); // Re-sort if name changed
              console.log(`Admin: Renamed category "${oldName}" to "${trimmedNewName}", updated ${productsUpdated} products.`);
         } else {
              console.log(`Admin: Edited details for category "${trimmedNewName}" (name unchanged).`);
         }
-        saveShopData();
+        saveShopData(); // Save potentially updated products and categories
         successMsg = `แก้ไขหมวดหมู่: "${oldName}" -> "${trimmedNewName}" สำเร็จ.${productsUpdated > 0 ? ' อัปเดต ' + productsUpdated + ' สินค้า.' : ''}`;
         res.redirect(`/admin/categories?message=${encodeURIComponent(successMsg)}`);
     } catch (error) {
@@ -2444,10 +2674,12 @@ app.post('/admin/categories/edit', (req, res) => {
 app.post('/admin/categories/delete/:name', (req, res) => {
      let errorMsg = '', successMsg = '';
     try {
+        // Decode the name from the URL parameter
         const decodedName = decodeURIComponent(req.params.name);
         const productsInCategory = shopData.products.filter(p => p.category === decodedName);
         if (productsInCategory.length > 0) {
             console.warn(`Admin: Attempted delete category "${decodedName}" with ${productsInCategory.length} products.`);
+            // Redirect back with a specific error code and the category name for the message
             return res.redirect(`/admin/categories?error=delete_failed_in_use&categoryName=${encodeURIComponent(decodedName)}`);
         }
 
@@ -2460,11 +2692,13 @@ app.post('/admin/categories/delete/:name', (req, res) => {
             console.log(`Admin: ${successMsg}`);
             res.redirect(`/admin/categories?message=${encodeURIComponent(successMsg)}`);
         } else {
+             // Should not happen if validation passed, but good safety check
              throw new Error('ไม่พบหมวดหมู่ที่ต้องการลบ');
         }
     } catch (error) {
         console.error(`Error deleting category ${decodeURIComponent(req.params.name)}:`, error);
          errorMsg = `ผิดพลาด: ${error.message}`;
+         // Redirect back with the error message
          res.redirect(`/admin/categories?error=${encodeURIComponent(errorMsg)}`);
     }
 });
@@ -2499,13 +2733,13 @@ app.post('/admin/orders/status/:id', (req, res) => {
 
         if (shopData.orders[orderIndex].status !== status) {
             shopData.orders[orderIndex].status = status;
-            shopData.orders[orderIndex].updatedAt = new Date().toISOString();
+            shopData.orders[orderIndex].updatedAt = new Date().toISOString(); // Update timestamp
             saveShopData();
             successMsg = `อัปเดตสถานะคำสั่งซื้อ ${id} เป็น ${status} สำเร็จ`;
             console.log(`Admin: ${successMsg}`);
-            res.redirect(`/admin/orders?message=${encodeURIComponent(successMsg)}#order-${id}`);
+            res.redirect(`/admin/orders?message=${encodeURIComponent(successMsg)}#order-${id}`); // Redirect back with hash
         } else {
-             res.redirect(`/admin/orders#order-${id}`);
+             res.redirect(`/admin/orders#order-${id}`); // Redirect back even if status didn't change
         }
     } catch (error) {
         console.error(`Error updating order status ${req.params.id}:`, error);
@@ -2518,7 +2752,7 @@ app.post('/admin/orders/delete/:id', (req, res) => {
     try {
         const { id } = req.params;
         const initialLength = shopData.orders.length;
-        shopData.orders = shopData.orders.filter(o => o.id !== id);
+        shopData.orders = shopData.orders.filter(o => o.id !== id); // Filter out the order
 
         if (shopData.orders.length < initialLength) {
             saveShopData();
@@ -2539,6 +2773,7 @@ app.post('/admin/orders/delete/:id', (req, res) => {
 // --- Redemption Code Routes ---
 app.get('/admin/codes', (req, res) => {
     try {
+        // Sort codes alphabetically for display
         const sortedCodes = [...validRedemptionCodes].sort();
         res.render('codes', {
              codes: sortedCodes,
@@ -2560,8 +2795,9 @@ app.post('/admin/codes/add', (req, res) => {
         let addedCount = 0;
         let skippedCount = 0;
         let message = '', error = '';
-        const addedCodesList = [];
+        const addedCodesList = []; // Keep track of actually added/generated codes
 
+        // 1. Handle manually entered code
         if (code && code.trim()) {
             code = code.trim().toUpperCase();
             if (code.length !== CODE_LENGTH || !CODE_PATTERN.test(code)) {
@@ -2574,78 +2810,87 @@ app.post('/admin/codes/add', (req, res) => {
                 addedCount++;
             }
         }
+        // 2. Handle generation if count > 0 AND no manual code was added/valid
         else if (count > 0 && addedCount === 0) {
-            if (count > 1000) {
-                 console.warn("Limiting code generation to 1000.");
+            if (count > 1000) { // Limit generation count
+                 console.warn("Limiting code generation to 1000 per request.");
                  count = 1000;
             }
 
-            let generatedCodes = new Set();
-            let existingCodesUpper = new Set(validRedemptionCodes.map(c => c.toUpperCase()));
+            let generatedCodes = new Set(); // Use Set to automatically handle duplicates during generation
+            let existingCodesUpper = new Set(validRedemptionCodes.map(c => c.toUpperCase())); // Set of existing codes for quick lookup
 
+             // Generate codes until the desired count is reached or max attempts fail
              while(generatedCodes.size < count) {
                  let attempts = 0;
                  let generatedCode;
-                 const maxAttempts = 30;
+                 const maxAttempts = 30; // Max attempts to generate a unique code before giving up
 
                  do {
+                     // Generate 16 random bytes -> 32 hex characters
                      generatedCode = crypto.randomBytes(16).toString('hex').toUpperCase();
                      attempts++;
-                 } while ((existingCodesUpper.has(generatedCode) || generatedCodes.has(generatedCode)) && attempts < maxAttempts);
+                 } while ((existingCodesUpper.has(generatedCode) || generatedCodes.has(generatedCode)) && attempts < maxAttempts); // Check against existing AND newly generated
 
                  if (attempts < maxAttempts) {
-                      generatedCodes.add(generatedCode);
+                      generatedCodes.add(generatedCode); // Add unique code to the set
                   } else {
-                      console.warn(`Failed to generate unique code after ${maxAttempts} attempts. Stopping generation. Generated: ${generatedCodes.size}/${count}`);
-                      skippedCount = count - generatedCodes.size;
-                      break;
+                      console.warn(`Failed to generate unique redemption code after ${maxAttempts} attempts. Stopping generation. Generated: ${generatedCodes.size}/${count}`);
+                      skippedCount = count - generatedCodes.size; // Record how many were skipped
+                      break; // Stop trying if it's too hard to find unique codes
                   }
              }
+             // Add the successfully generated unique codes to the main list
              if (generatedCodes.size > 0) {
                  const codesToAdd = Array.from(generatedCodes);
                  validRedemptionCodes.push(...codesToAdd);
-                 addedCodesList.push(...codesToAdd);
+                 addedCodesList.push(...codesToAdd); // Keep track for message
                  addedCount += generatedCodes.size;
              }
         } else if (addedCount === 0 && count <= 0) {
+             // No manual code, no valid count
              error = "กรุณาใส่โค้ดเอง หรือระบุจำนวนที่ต้องการสร้าง (> 0)";
         }
 
+        // Save and redirect based on outcome
         if (addedCount > 0) {
-            validRedemptionCodes.sort();
+            validRedemptionCodes.sort(); // Keep the list sorted
             saveValidRedemptionCodes();
-            console.log(`Admin: Added ${addedCount} redemption code(s).`);
+            console.log(`Admin: Added/Generated ${addedCount} redemption code(s).`);
             message = `เพิ่ม/สร้างโค้ดสำเร็จ ${addedCount} โค้ด.`;
             if (skippedCount > 0) message += ` ข้าม ${skippedCount} โค้ด (อาจเกิดจากชนกัน).`;
-            if (error) message += ` หมายเหตุ: ${error}`;
+            if (error) message += ` หมายเหตุ: ${error}`; // Append any error from manual validation
             res.redirect(`/admin/codes?message=${encodeURIComponent(message)}`);
         } else {
+             // Only errors occurred, or no action taken
              if (!error) error = "ไม่ได้เพิ่มโค้ด (โปรดตรวจสอบข้อมูล)";
              res.redirect(`/admin/codes?error=${encodeURIComponent(error)}`);
         }
     } catch (err) {
-        console.error("Error adding/generating codes:", err);
-        res.redirect(`/admin/codes?error=${encodeURIComponent('ผิดพลาด: ' + err.message)}`);
+        console.error("Error adding/generating redemption codes:", err);
+        res.redirect(`/admin/codes?error=${encodeURIComponent('ผิดพลาดระบบ: ' + err.message)}`);
     }
 });
 app.post('/admin/codes/delete/:code', (req, res) => {
     try {
         const codeToDelete = req.params.code?.toUpperCase();
+        // Basic validation of the code format from the URL
         if (!codeToDelete || !/^[A-Z0-9]{32}$/.test(codeToDelete)) {
-             throw new Error('รูปแบบโค้ดไม่ถูกต้อง');
+             throw new Error('รูปแบบโค้ดใน URL ไม่ถูกต้อง');
         }
         const initialLength = validRedemptionCodes.length;
+        // Filter out the code (case-insensitive comparison)
         validRedemptionCodes = validRedemptionCodes.filter(c => c.toUpperCase() !== codeToDelete);
 
         if (validRedemptionCodes.length < initialLength) {
             saveValidRedemptionCodes();
-            console.log(`Admin: Code deleted - ${codeToDelete}`);
+            console.log(`Admin: Redemption code deleted - ${codeToDelete}`);
             res.redirect('/admin/codes?message=' + encodeURIComponent(`ลบโค้ด "${codeToDelete}" สำเร็จ.`));
         } else {
-             throw new Error(`ไม่พบโค้ด "${codeToDelete}"`);
+             throw new Error(`ไม่พบโค้ด "${codeToDelete}" ที่ต้องการลบ`);
         }
     } catch (error) {
-        console.error(`Error deleting code ${req.params.code}:`, error);
+        console.error(`Error deleting redemption code ${req.params.code}:`, error);
         res.redirect(`/admin/codes?error=${encodeURIComponent('ผิดพลาด: ' + error.message)}`);
     }
 });
@@ -2654,6 +2899,7 @@ app.post('/admin/codes/delete/:code', (req, res) => {
 // --- Discount Code Routes ---
 app.get('/admin/discounts', (req, res) => {
      try {
+        // Sort by creation date, newest first
         const sortedDiscounts = [...discountCodes]
             .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
         res.render('discounts', {
@@ -2672,64 +2918,70 @@ app.post('/admin/discounts/add', (req, res) => {
         let { code, type, value, maxUses, minPurchase, expiresAt } = req.body;
         let errors = [];
 
+        // --- Validation ---
         code = code ? code.trim().toUpperCase() : '';
-        if (!code || !/^[A-Z0-9]{3,20}$/.test(code)) {
+        if (!code || !/^[A-Z0-9]{3,20}$/.test(code)) { // Allow 3 to 20 chars for code
             errors.push('รูปแบบโค้ดไม่ถูกต้อง (3-20 ตัว A-Z, 0-9)');
         } else if (discountCodes.some(dc => dc.code === code)) {
             errors.push(`โค้ดส่วนลด "${code}" มีอยู่แล้ว`);
         }
         if (type !== 'percentage' && type !== 'fixed') {
-             errors.push('ประเภทส่วนลดไม่ถูกต้อง');
+             errors.push('ประเภทส่วนลดไม่ถูกต้อง (percentage หรือ fixed)');
         }
 
         value = parseFloat(value);
-        if (isNaN(value) || value <= 0) errors.push('มูลค่าส่วนลดต้องเป็นบวก');
+        if (isNaN(value) || value <= 0) errors.push('มูลค่าส่วนลดต้องเป็นเลขบวก');
         else if (type === 'percentage' && value > 100) errors.push('ส่วนลดเปอร์เซ็นต์ห้ามเกิน 100%');
 
+        // Handle maxUses: null means infinity, otherwise must be >= 1
         maxUses = maxUses ? (parseInt(maxUses, 10) || null) : null;
-        if (maxUses !== null && maxUses < 1) errors.push('จำนวนครั้งสูงสุดต้อง >= 1 (หรือเว้นว่าง)');
+        if (maxUses !== null && maxUses < 1) errors.push('จำนวนครั้งสูงสุดต้อง >= 1 (หรือเว้นว่างสำหรับไม่จำกัด)');
 
         minPurchase = minPurchase ? (parseFloat(minPurchase) || 0) : 0;
         if (minPurchase < 0) errors.push('ยอดซื้อขั้นต่ำห้ามติดลบ');
 
+        // Handle expiresAt: Store as ISO string (end of day in local timezone) or null
         let expiryDate = null;
         if (expiresAt) {
             try {
-                 const d = new Date(expiresAt);
+                 const d = new Date(expiresAt); // Parses based on local timezone if no timezone specified
                  if (isNaN(d.getTime())) throw new Error('Invalid date value');
-                 const localDate = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-                 expiryDate = localDate.toISOString();
-                 console.log(`Setting expiry for ${code} to ${expiryDate} (from input ${expiresAt})`);
+                 // Set time to end of the selected day (23:59:59.999) in local timezone
+                 const localEndDate = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+                 expiryDate = localEndDate.toISOString(); // Store as UTC ISO string
+                 console.log(`Setting discount expiry for ${code} to ${expiryDate} (End of Day in local timezone, derived from input ${expiresAt})`);
             } catch {
-                errors.push('รูปแบบวันหมดอายุไม่ถูกต้อง');
+                errors.push('รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)');
             }
         }
 
         if (errors.length > 0) {
+             // Redirect back with errors
              return res.redirect(`/admin/discounts?error=${encodeURIComponent(errors.join(', '))}`);
         }
 
+        // --- Create and Save ---
         const newDiscount = {
              id: `DC-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
              code: code,
              type: type,
              value: value,
-             maxUses: maxUses,
+             maxUses: maxUses, // null or number
              uses: 0,
              minPurchase: minPurchase,
-             expiresAt: expiryDate,
+             expiresAt: expiryDate, // null or ISO string
              createdAt: new Date().toISOString()
         };
 
         discountCodes.push(newDiscount);
         saveDiscountCodes();
-        console.log(`Admin: Discount code added - ${newDiscount.code}`);
+        console.log(`Admin: Discount code added - ${newDiscount.code} (ID: ${newDiscount.id})`);
         let message = `เพิ่มโค้ดส่วนลด "${newDiscount.code}" สำเร็จ.`;
         res.redirect(`/admin/discounts?message=${encodeURIComponent(message)}`);
 
     } catch (err) {
         console.error("Error adding discount code:", err);
-        res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาด: ' + err.message)}`);
+        res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาดระบบ: ' + err.message)}`);
     }
 });
 app.post('/admin/discounts/edit/:id', (req, res) => {
@@ -2743,10 +2995,11 @@ app.post('/admin/discounts/edit/:id', (req, res) => {
              return res.status(404).send('ไม่พบโค้ดส่วนลดที่ต้องการแก้ไข');
          }
 
+         // --- Validation (similar to add, but check collision against others) ---
          code = code ? code.trim().toUpperCase() : '';
          if (!code || !/^[A-Z0-9]{3,20}$/.test(code)) {
             errors.push('รูปแบบโค้ดไม่ถูกต้อง (3-20 ตัว A-Z, 0-9)');
-         } else if (discountCodes.some(dc => dc.code === code && dc.id !== id)) {
+         } else if (discountCodes.some(dc => dc.code === code && dc.id !== id)) { // Check collision excluding self
              errors.push(`โค้ดส่วนลด "${code}" ซ้ำกับโค้ดอื่น`);
          }
          if (type !== 'percentage' && type !== 'fixed') {
@@ -2754,7 +3007,7 @@ app.post('/admin/discounts/edit/:id', (req, res) => {
          }
 
          value = parseFloat(value);
-         if (isNaN(value) || value <= 0) errors.push('มูลค่าส่วนลดต้องเป็นบวก');
+         if (isNaN(value) || value <= 0) errors.push('มูลค่าส่วนลดต้องเป็นเลขบวก');
          else if (type === 'percentage' && value > 100) errors.push('ส่วนลดเปอร์เซ็นต์ห้ามเกิน 100%');
 
           maxUses = maxUses ? (parseInt(maxUses, 10) || null) : null;
@@ -2768,11 +3021,11 @@ app.post('/admin/discounts/edit/:id', (req, res) => {
              try {
                   const d = new Date(expiresAt);
                   if (isNaN(d.getTime())) throw new Error('Invalid date value');
-                  const localDate = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-                  expiryDate = localDate.toISOString();
-                  console.log(`Setting expiry for ${code} (edit) to ${expiryDate} (from input ${expiresAt})`);
+                  const localEndDate = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+                  expiryDate = localEndDate.toISOString();
+                  console.log(`Setting discount expiry for ${code} (edit) to ${expiryDate} (from input ${expiresAt})`);
              } catch {
-                 errors.push('รูปแบบวันหมดอายุไม่ถูกต้อง');
+                 errors.push('รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)');
              }
           }
 
@@ -2780,20 +3033,23 @@ app.post('/admin/discounts/edit/:id', (req, res) => {
               return res.redirect(`/admin/discounts?error=${encodeURIComponent(errors.join(', '))}`);
          }
 
+         // --- Update and Save ---
          const currentDiscount = discountCodes[discountIndex];
-         const currentUses = currentDiscount.uses || 0;
+         const currentUses = currentDiscount.uses || 0; // Preserve current usage count
 
+          // Prevent setting maxUses lower than current uses
           if (maxUses !== null && maxUses < currentUses) {
-              return res.redirect(`/admin/discounts?error=${encodeURIComponent(`ไม่สามารถลดจำนวนครั้งสูงสุด (${maxUses}) ให้น้อยกว่าที่ใช้ไปแล้ว (${currentUses})`)}`);
+              return res.redirect(`/admin/discounts?error=${encodeURIComponent(`ไม่สามารถลดจำนวนครั้งสูงสุด (${maxUses}) ให้น้อยกว่าที่ใช้ไปแล้ว (${currentUses}) สำหรับโค้ด ${currentDiscount.code}`)}`);
           }
 
+         // Update fields
          currentDiscount.code = code;
          currentDiscount.type = type;
          currentDiscount.value = value;
          currentDiscount.maxUses = maxUses;
          currentDiscount.minPurchase = minPurchase;
          currentDiscount.expiresAt = expiryDate;
-         currentDiscount.uses = currentUses; // Ensure uses count is preserved
+         // currentDiscount.uses = currentUses; // Uses count remains unchanged by editing
 
          saveDiscountCodes();
          console.log(`Admin: Discount code edited - ${currentDiscount.code} (ID: ${id})`);
@@ -2802,23 +3058,23 @@ app.post('/admin/discounts/edit/:id', (req, res) => {
 
      } catch (err) {
          console.error(`Error editing discount code ${req.params.id}:`, err);
-         res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาด: ' + err.message)}`);
+         res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาดระบบ: ' + err.message)}`);
      }
 });
 app.post('/admin/discounts/delete/:id', (req, res) => {
      try {
          const { id } = req.params;
          const initialLength = discountCodes.length;
-         const codeToDelete = discountCodes.find(dc => dc.id === id)?.code;
+         const codeToDelete = discountCodes.find(dc => dc.id === id)?.code; // Get code for message
 
-         discountCodes = discountCodes.filter(dc => dc.id !== id);
+         discountCodes = discountCodes.filter(dc => dc.id !== id); // Filter out by ID
 
          if (discountCodes.length < initialLength) {
              saveDiscountCodes();
              console.log(`Admin: Discount code deleted - ID ${id} (Code: ${codeToDelete || 'N/A'})`);
              res.redirect('/admin/discounts?message=' + encodeURIComponent(`ลบโค้ดส่วนลด "${codeToDelete || id}" สำเร็จ.`));
          } else {
-              throw new Error(`ไม่พบโค้ดส่วนลด ID "${id}"`);
+              throw new Error(`ไม่พบโค้ดส่วนลด ID "${id}" ที่ต้องการลบ`);
          }
      } catch (error) {
          console.error(`Error deleting discount code ${req.params.id}:`, error);
@@ -2868,13 +3124,13 @@ const templates = {
 </nav>
 `,
     'dashboard.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>แดชบอร์ด - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.card-icon{font-size:2.5rem}.card{transition:transform .2s ease-in-out}.card:hover{transform:translateY(-5px);box-shadow:0 4px 8px rgba(0,0,0,.1)}body{padding-top:70px;background-color:#f8f9fa}.card-footer span{margin-right:auto}.table th,.table td{vertical-align:middle}</style></head><body><%- include('navbar', { pageTitle: 'Dashboard' }) %><div class="container mt-4"><h2 class="mb-4"><i class="bi bi-speedometer2"></i> แดชบอร์ดภาพรวม</h2><div class="row g-4 mb-4"><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-primary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">สินค้า</h5><h2 class="card-text display-6"><%= stats.totalProducts %></h2></div><i class="bi bi-box-seam card-icon opacity-75"></i></div><a href="/admin/products" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการสินค้า</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-info h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">หมวดหมู่</h5><h2 class="card-text display-6"><%= stats.totalCategories %></h2></div><i class="bi bi-tags card-icon opacity-75"></i></div><a href="/admin/categories" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการหมวดหมู่</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-success h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">คำสั่งซื้อสำเร็จ</h5><h2 class="card-text display-6"><%= stats.completedOrders %> <small>/ <%= stats.totalOrders %></small></h2></div><i class="bi bi-cart-check card-icon opacity-75"></i></div><a href="/admin/orders" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>ดูคำสั่งซื้อ</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-6 col-sm-6"><div class="card text-dark bg-warning h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">รายรับรวม</h5><h3 class="card-text">฿<%= stats.totalRevenue %></h3><small>(หลังหักส่วนลด)</small></div><i class="bi bi-currency-bitcoin card-icon opacity-75"></i></div><div class="card-footer text-dark"><small>ยอดส่วนลดรวม: ฿<%= stats.totalDiscountsGiven %></small></div></div></div><div class="col-xl-2dot4 col-md-6 col-sm-12"><div class="card text-white bg-secondary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">ส่วนลดใช้งาน</h5><h2 class="card-text display-6"><%= stats.activeDiscountCodes %></h2></div><i class="bi bi-percent card-icon opacity-75"></i></div><a href="/admin/discounts" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการส่วนลด</span> <i class="bi bi-arrow-right-circle"></i></a></div></div></div><!-- Auto Promotion Status --><div class="alert alert-primary" role="alert"><i class="bi bi-megaphone-fill"></i> <strong>สถานะโปรโมชั่นอัตโนมัติ:</strong> <%= stats.autoPromotionStatus %> <a href="/admin/settings" class="alert-link ms-2">(แก้ไข)</a></div><div class="card mt-4"><div class="card-header bg-light"><h4><i class="bi bi-clock-history"></i> คำสั่งซื้อล่าสุด (5 รายการ)</h4></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รหัส</th><th>ลูกค้า</th><th>ยอดรวม (ส่วนลด)</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่</th></tr></thead><tbody><% if(stats.recentOrders.length > 0){ %><% stats.recentOrders.forEach(order => { const finalAmount = order.finalAmount !== undefined ? order.finalAmount : ((order.originalTotalAmount || 0) - (order.discountAmount || 0)); %><tr><td><a href="/admin/orders#order-<%= order.id %>" title="<%= order.id %>"><%= order.id.slice(0,12) %>...</a></td><td><span title="<%= order.userId %>"><%= order.userId.slice(0,6) %>...<%= order.userId.slice(-4) %></span></td><td>฿<%= finalAmount.toFixed(2) %><% if (order.discountAmount && order.discountAmount > 0) { %><br><small class="text-danger" title="Code: <%= order.discountCode || 'N/A' %>">(-฿<%= order.discountAmount.toFixed(2) %><% if (order.discountCode === 'AUTO_PROMO') { %> <i class="bi bi-stars text-warning" title="โปรโมชั่นอัตโนมัติ"></i><% } %>)</small><% } %></td><td><span class="badge bg-<%= order.paymentMethod==='angpao'?'danger':order.paymentMethod==='bank'?'info':order.paymentMethod==='redeem_code'?'primary':'secondary' %> text-capitalize"><i class="bi bi-<%= order.paymentMethod==='angpao'?'gift':order.paymentMethod==='bank'?'bank':order.paymentMethod==='redeem_code'?'key':'question-circle' %>"></i> <%= order.paymentMethod || 'N/A' %></span></td><td><span class="badge bg-<%= order.status === 'completed' ? 'success' : (order.status === 'cancelled' || order.status === 'refunded' ? 'danger' : (order.status === 'pending' ? 'warning' : 'secondary')) %> text-capitalize"><%= order.status || 'N/A' %></span></td><td><%= new Date(order.createdAt || Date.now()).toLocaleString('th-TH', {dateStyle:'short', timeStyle:'short'}) %></td></tr><% }) %><% } else { %><tr><td colspan="6" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div><div class="card-footer text-end bg-light border-top-0"><a href="/admin/orders" class="btn btn-outline-primary btn-sm">ดูคำสั่งซื้อทั้งหมด <i class="bi bi-arrow-right"></i></a></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><style>.col-xl-2dot4 { flex: 0 0 auto; width: 20%; } @media (max-width: 1200px) { .col-xl-2dot4 { width: 33.333%; } } @media (max-width: 768px) { .col-xl-2dot4 { width: 50%; } } @media (max-width: 576px) { .col-xl-2dot4 { width: 100%; } }</style></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>แดชบอร์ด - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.card-icon{font-size:2.5rem}.card{transition:transform .2s ease-in-out}.card:hover{transform:translateY(-5px);box-shadow:0 4px 8px rgba(0,0,0,.1)}body{padding-top:70px;background-color:#f8f9fa}.card-footer span{margin-right:auto}.table th,.table td{vertical-align:middle}.alert i { vertical-align: -0.125em; }</style></head><body><%- include('navbar', { pageTitle: 'Dashboard' }) %><div class="container mt-4"><h2 class="mb-4"><i class="bi bi-speedometer2"></i> แดชบอร์ดภาพรวม</h2><div class="row g-4 mb-4"><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-primary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">สินค้า</h5><h2 class="card-text display-6"><%= stats.totalProducts %></h2></div><i class="bi bi-box-seam card-icon opacity-75"></i></div><a href="/admin/products" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการสินค้า</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-info h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">หมวดหมู่</h5><h2 class="card-text display-6"><%= stats.totalCategories %></h2></div><i class="bi bi-tags card-icon opacity-75"></i></div><a href="/admin/categories" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการหมวดหมู่</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-success h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">คำสั่งซื้อสำเร็จ</h5><h2 class="card-text display-6"><%= stats.completedOrders %> <small>/ <%= stats.totalOrders %></small></h2></div><i class="bi bi-cart-check card-icon opacity-75"></i></div><a href="/admin/orders" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>ดูคำสั่งซื้อ</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-6 col-sm-6"><div class="card text-dark bg-warning h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">รายรับรวม</h5><h3 class="card-text">฿<%= stats.totalRevenue %></h3><small>(หลังหักส่วนลด)</small></div><i class="bi bi-currency-bitcoin card-icon opacity-75"></i></div><div class="card-footer text-dark"><small>ยอดส่วนลดรวม: ฿<%= stats.totalDiscountsGiven %></small></div></div></div><div class="col-xl-2dot4 col-md-6 col-sm-12"><div class="card text-white bg-secondary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">ส่วนลดใช้งาน</h5><h2 class="card-text display-6"><%= stats.activeDiscountCodes %></h2></div><i class="bi bi-percent card-icon opacity-75"></i></div><a href="/admin/discounts" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการส่วนลด</span> <i class="bi bi-arrow-right-circle"></i></a></div></div></div><!-- Status Alerts --><div class="row g-2 mb-3"><div class="col-md-6"><div class="alert alert-primary mb-0" role="alert"><i class="bi bi-megaphone-fill"></i> <strong>โปรโมชั่นอัตโนมัติ:</strong> <%= stats.autoPromotionStatus %> <a href="/admin/settings" class="alert-link ms-2">(แก้ไข)</a></div></div><div class="col-md-6"><div class="alert alert-<%= stats.aiChatStatus === 'เปิดใช้งาน' ? 'info' : 'secondary' %> mb-0" role="alert"><i class="bi bi-robot"></i> <strong>AI Chat:</strong> <%= stats.aiChatStatus %> <a href="/admin/settings" class="alert-link ms-2">(แก้ไข)</a></div></div></div><div class="card mt-4"><div class="card-header bg-light"><h4><i class="bi bi-clock-history"></i> คำสั่งซื้อล่าสุด (5 รายการ)</h4></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รหัส</th><th>ลูกค้า</th><th>ยอดรวม (ส่วนลด)</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่</th></tr></thead><tbody><% if(stats.recentOrders.length > 0){ %><% stats.recentOrders.forEach(order => { const finalAmount = order.finalAmount !== undefined ? order.finalAmount : ((order.originalTotalAmount || 0) - (order.discountAmount || 0)); %><tr><td><a href="/admin/orders#order-<%= order.id %>" title="<%= order.id %>"><%= order.id.slice(0,12) %>...</a></td><td><span title="<%= order.userId %>"><%= order.userId.slice(0,6) %>...<%= order.userId.slice(-4) %></span></td><td>฿<%= finalAmount.toFixed(2) %><% if (order.discountAmount && order.discountAmount > 0) { %><br><small class="text-danger" title="Code: <%= order.discountCode || 'N/A' %>">(-฿<%= order.discountAmount.toFixed(2) %><% if (order.discountCode === 'AUTO_PROMO') { %> <i class="bi bi-stars text-warning" title="โปรโมชั่นอัตโนมัติ"></i><% } %>)</small><% } %></td><td><span class="badge bg-<%= order.paymentMethod==='angpao'?'danger':order.paymentMethod==='bank'?'info':order.paymentMethod==='redeem_code'?'primary':'secondary' %> text-capitalize"><i class="bi bi-<%= order.paymentMethod==='angpao'?'gift':order.paymentMethod==='bank'?'bank':order.paymentMethod==='redeem_code'?'key':'question-circle' %>"></i> <%= order.paymentMethod || 'N/A' %></span></td><td><span class="badge bg-<%= order.status === 'completed' ? 'success' : (order.status === 'cancelled' || order.status === 'refunded' ? 'danger' : (order.status === 'pending' ? 'warning' : 'secondary')) %> text-capitalize"><%= order.status || 'N/A' %></span></td><td><%= new Date(order.createdAt || Date.now()).toLocaleString('th-TH', {dateStyle:'short', timeStyle:'short'}) %></td></tr><% }) %><% } else { %><tr><td colspan="6" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div><div class="card-footer text-end bg-light border-top-0"><a href="/admin/orders" class="btn btn-outline-primary btn-sm">ดูคำสั่งซื้อทั้งหมด <i class="bi bi-arrow-right"></i></a></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><style>.col-xl-2dot4 { flex: 0 0 auto; width: 20%; } @media (max-width: 1200px) { .col-xl-2dot4 { width: 33.333%; } } @media (max-width: 992px) { .col-xl-2dot4 { width: 50%; } } @media (max-width: 576px) { .col-xl-2dot4 { width: 100%; } }</style></body></html>
 `,
     'products.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการสินค้า - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.product-image-thumb{width:60px;height:60px;object-fit:cover;border-radius:4px}.image-preview{max-width:150px;max-height:100px;margin-top:10px;display:none;border:1px solid #ddd;padding:2px;border-radius:4px}th,td{vertical-align:middle}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.stock-items-display{font-size:.8rem;color:#6c757d;max-height:60px;overflow-y:auto;display:block;white-space:pre-wrap;word-break:break-all}.stock-item-delete-btn{font-size:.7rem;padding:.1rem .3rem;line-height:1}.modal-xl{max-width:1000px}</style></head><body><%- include('navbar', { pageTitle: 'Products' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-box-seam"></i> จัดการสินค้า (<%= products.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addProductModal"><i class="bi bi-plus-circle"></i> เพิ่มสินค้า</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อ</th><th>ราคา (฿)</th><th>คงเหลือ</th><th>หมวดหมู่</th><th>วันที่เพิ่ม/แก้ไข</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if(products.length > 0){ %><% products.forEach(product => { const modalId = "editProductModal" + product.id.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td><img src="<%= product.imageUrl %>" alt="Img" class="product-image-thumb" onerror="this.onerror=null; this.src='https://via.placeholder.com/60/dee2e6/6c757d?text=Err';"></td><td><%= product.name %><br><small class="text-muted">ID: <%= product.id.substring(0, 10) %>...</small></td><td><%= product.price.toFixed(2) %></td><td><span class="badge fs-6 bg-<%= product.stock > 5 ? 'success' : (product.stock > 0 ? 'warning' : 'danger') %>" title="คลิกเพื่อแก้ไขสต็อก" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" style="cursor:pointer;"><%= product.stock %></span></td><td><small><%= product.category %></small></td><td><small title="Created: <%= new Date(product.createdAt || 0).toLocaleString('th-TH') %>\nUpdated: <%= new Date(product.updatedAt || 0).toLocaleString('th-TH') %>"><%= new Date(product.updatedAt || product.createdAt || 0).toLocaleDateString('th-TH', { year:'2-digit', month:'short', day:'numeric'}) %></small></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/products/delete/<%= product.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('ยืนยันลบสินค้า: <%= product.name %> ?')" title="ลบ"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีสินค้าในระบบ</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Product Modal --><div class="modal fade" id="addProductModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/products/add"><div class="modal-header"><h5 class="modal-title">เพิ่มสินค้าใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อสินค้า*</label><input type="text" name="name" class="form-control" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา (฿)*</label><input type="number" name="price" class="form-control" step="0.01" min="0" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><option value="" disabled <%= categories.length === 0 ? '' : 'selected' %>>-- เลือก --</option><% categories.forEach(c => { %><option value="<%= c.name %>"><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! กรุณาเพิ่มหมวดหมู่ก่อน !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" required placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">ต้องเป็น https:// และลงท้ายด้วย .jpg, .png, .gif, .webp</div></div><div class="mb-3"><label class="form-label">ข้อมูลสต็อกสินค้า (Stock Items)*</label><textarea name="stockItemsInput" class="form-control" required rows="5" placeholder="ใส่ข้อมูลที่จะส่งให้ลูกค้า 1 รายการ ต่อ 1 บรรทัด (เช่น โค้ด, ลิงก์ดาวน์โหลด)"></textarea><div class="form-text">จำนวนบรรทัด = จำนวนสต็อกเริ่มต้น. ห้ามเว้นบรรทัดว่าง.</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary" <%= categories.length === 0 ? 'disabled' : '' %>>บันทึกสินค้า</button></div></form></div></div></div><!-- Edit Product Modals --><% products.forEach(product => { const modalId = "editProductModal" + product.id.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-xl"><div class="modal-content"><form method="POST" action="/admin/products/edit/<%= product.id %>"><div class="modal-header"><h5 class="modal-title">แก้ไขสินค้า: <%= product.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row"><div class="col-lg-7"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" value="<%= product.name %>" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา*</label><input type="number" name="price" class="form-control" step="0.01" min="0" value="<%= product.price %>" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><% categories.forEach(c => { %><option value="<%= c.name %>" <%= c.name === product.category ? 'selected' : '' %>><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! ไม่มีหมวดหมู่ !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= product.description %></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control" value="<%= product.language || '' %>"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control" value="<%= product.version || '' %>"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= product.imageUrl %>" required><img src="<%= product.imageUrl %>" class="image-preview" style="display:block;" onerror="this.style.display='none';"><div class="form-text text-muted">ต้องเป็น https:// และลงท้ายด้วย .jpg, .png, .gif, .webp</div></div></div><div class="col-lg-5"><div class="mb-3"><label class="form-label">รายการสต็อกปัจจุบัน (<%= product.stockItems ? product.stockItems.length : 0 %> รายการ)</label><div class="border rounded p-2 bg-light stock-items-display" style="max-height: 150px; overflow-y: auto;"><% if (Array.isArray(product.stockItems) && product.stockItems.length > 0) { %><ul class="list-unstyled mb-0"><% product.stockItems.forEach((item, index) => { %><li class="d-flex justify-content-between align-items-center mb-1"><small class="me-2 text-truncate" title="<%= item %>"><%= index + 1 %>. <%= item %></small><form method="POST" action="/admin/products/stock/delete/<%= product.id %>/<%= index %>" class="d-inline" onsubmit="return confirm('ยืนยันลบสต็อกรายการที่ <%= index + 1 %> ?')"><button type="submit" class="btn btn-outline-danger btn-sm stock-item-delete-btn" title="ลบรายการนี้"><i class="bi bi-x-lg"></i></button></form></li><% }) %></ul><% } else { %><span class="text-muted">ไม่มีสต็อก</span><% } %></div></div><hr><div class="mb-3"><label class="form-label">เพิ่มสต็อก (Stock Items)</label><textarea name="stockItemsToAdd" class="form-control" rows="4" placeholder="ใส่ข้อมูลสต็อกที่จะเพิ่ม 1 รายการ ต่อ 1 บรรทัด"></textarea><div class="form-text">ข้อมูลที่เพิ่มจะต่อท้ายรายการเดิม. ห้ามเว้นบรรทัดว่าง.</div></div></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=e=>{const o=e.querySelector('.image-url-input'),n=e.querySelector('.image-preview');if(!o||!n)return;const i=()=>{const t=o.value.trim(),l=/^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp)([\?#].*)?$/i.test(t);l?(n.src=t,n.style.display='block',o.classList.remove('is-invalid'),n.onerror=()=>{n.style.display='none';o.classList.add('is-invalid')}) : (n.style.display='none',n.src='',t?o.classList.add('is-invalid'):o.classList.remove('is-invalid'))};o.addEventListener('input',i),o.dispatchEvent(new Event('input'))};document.querySelectorAll('.modal').forEach(t);const e=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(t){}},1e4)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการสินค้า - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.product-image-thumb{width:60px;height:60px;object-fit:cover;border-radius:4px}.image-preview{max-width:150px;max-height:100px;margin-top:10px;display:none;border:1px solid #ddd;padding:2px;border-radius:4px}th,td{vertical-align:middle}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.stock-items-display{font-size:.8rem;color:#6c757d;max-height:60px;overflow-y:auto;display:block;white-space:pre-wrap;word-break:break-all}.stock-item-delete-btn{font-size:.7rem;padding:.1rem .3rem;line-height:1}.modal-xl{max-width:1000px}</style></head><body><%- include('navbar', { pageTitle: 'Products' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-box-seam"></i> จัดการสินค้า (<%= products.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addProductModal"><i class="bi bi-plus-circle"></i> เพิ่มสินค้า</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อ</th><th>ราคา (฿)</th><th>คงเหลือ</th><th>หมวดหมู่</th><th>วันที่เพิ่ม/แก้ไข</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if(products.length > 0){ %><% products.forEach(product => { const modalId = "editProductModal" + product.id.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td><img src="<%= product.imageUrl %>" alt="Img" class="product-image-thumb" onerror="this.onerror=null; this.src='https://via.placeholder.com/60/dee2e6/6c757d?text=Err';"></td><td><%= product.name %><br><small class="text-muted">ID: <%= product.id.substring(0, 10) %>...</small></td><td><%= product.price.toFixed(2) %></td><td><span class="badge fs-6 bg-<%= product.stock > 5 ? 'success' : (product.stock > 0 ? 'warning' : 'danger') %>" title="คลิกเพื่อแก้ไขสต็อก" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" style="cursor:pointer;"><%= product.stock %></span></td><td><small><%= product.category %></small></td><td><small title="Created: <%= new Date(product.createdAt || 0).toLocaleString('th-TH') %>\nUpdated: <%= new Date(product.updatedAt || 0).toLocaleString('th-TH') %>"><%= new Date(product.updatedAt || product.createdAt || 0).toLocaleDateString('th-TH', { year:'2-digit', month:'short', day:'numeric'}) %></small></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/products/delete/<%= product.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('ยืนยันลบสินค้า: <%= product.name %> ?')" title="ลบ"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีสินค้าในระบบ</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Product Modal --><div class="modal fade" id="addProductModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/products/add"><div class="modal-header"><h5 class="modal-title">เพิ่มสินค้าใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อสินค้า*</label><input type="text" name="name" class="form-control" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา (฿)*</label><input type="number" name="price" class="form-control" step="0.01" min="0" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><option value="" disabled <%= categories.length === 0 ? '' : 'selected' %>>-- เลือก --</option><% categories.forEach(c => { %><option value="<%= c.name %>"><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! กรุณาเพิ่มหมวดหมู่ก่อน !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" required placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">ต้องเป็น http/https:// และลงท้ายด้วย .jpg, .png, .gif, .webp, .svg etc.</div></div><div class="mb-3"><label class="form-label">ข้อมูลสต็อกสินค้า (Stock Items)*</label><textarea name="stockItemsInput" class="form-control" required rows="5" placeholder="ใส่ข้อมูลที่จะส่งให้ลูกค้า 1 รายการ ต่อ 1 บรรทัด (เช่น โค้ด, ลิงก์ดาวน์โหลด)"></textarea><div class="form-text">จำนวนบรรทัด = จำนวนสต็อกเริ่มต้น. ห้ามเว้นบรรทัดว่าง.</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary" <%= categories.length === 0 ? 'disabled' : '' %>>บันทึกสินค้า</button></div></form></div></div></div><!-- Edit Product Modals --><% products.forEach(product => { const modalId = "editProductModal" + product.id.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-xl"><div class="modal-content"><form method="POST" action="/admin/products/edit/<%= product.id %>"><div class="modal-header"><h5 class="modal-title">แก้ไขสินค้า: <%= product.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row"><div class="col-lg-7"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" value="<%= product.name %>" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา*</label><input type="number" name="price" class="form-control" step="0.01" min="0" value="<%= product.price %>" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><% categories.forEach(c => { %><option value="<%= c.name %>" <%= c.name === product.category ? 'selected' : '' %>><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! ไม่มีหมวดหมู่ !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= product.description %></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control" value="<%= product.language || '' %>"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control" value="<%= product.version || '' %>"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= product.imageUrl %>" required><img src="<%= product.imageUrl %>" class="image-preview" style="display:block;" onerror="this.style.display='none';"><div class="form-text text-muted">ต้องเป็น http/https:// และลงท้ายด้วย .jpg, .png, .gif, .webp, .svg etc.</div></div></div><div class="col-lg-5"><div class="mb-3"><label class="form-label">รายการสต็อกปัจจุบัน (<%= product.stockItems ? product.stockItems.length : 0 %> รายการ)</label><div class="border rounded p-2 bg-light stock-items-display" style="max-height: 150px; overflow-y: auto;"><% if (Array.isArray(product.stockItems) && product.stockItems.length > 0) { %><ul class="list-unstyled mb-0"><% product.stockItems.forEach((item, index) => { %><li class="d-flex justify-content-between align-items-center mb-1"><small class="me-2 text-truncate" title="<%= item %>"><%= index + 1 %>. <%= item %></small><form method="POST" action="/admin/products/stock/delete/<%= product.id %>/<%= index %>" class="d-inline" onsubmit="return confirm('ยืนยันลบสต็อกรายการที่ <%= index + 1 %> ?')"><button type="submit" class="btn btn-outline-danger btn-sm stock-item-delete-btn" title="ลบรายการนี้"><i class="bi bi-x-lg"></i></button></form></li><% }) %></ul><% } else { %><span class="text-muted">ไม่มีสต็อก</span><% } %></div></div><hr><div class="mb-3"><label class="form-label">เพิ่มสต็อก (Stock Items)</label><textarea name="stockItemsToAdd" class="form-control" rows="4" placeholder="ใส่ข้อมูลสต็อกที่จะเพิ่ม 1 รายการ ต่อ 1 บรรทัด"></textarea><div class="form-text">ข้อมูลที่เพิ่มจะต่อท้ายรายการเดิม. ห้ามเว้นบรรทัดว่าง.</div></div></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=e=>{const o=e.querySelector('.image-url-input'),n=e.querySelector('.image-preview');if(!o||!n)return;const i=()=>{const t=o.value.trim(),l=/^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp|bmp|svg)([\?#].*)?$/i.test(t);l?(n.src=t,n.style.display='block',o.classList.remove('is-invalid'),n.onerror=()=>{n.style.display='none';o.classList.add('is-invalid')}) : (n.style.display='none',n.src='',t?o.classList.add('is-invalid'):o.classList.remove('is-invalid'))};o.addEventListener('input',i),o.dispatchEvent(new Event('input'))};document.querySelectorAll('.modal').forEach(t);const e=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(t){}},1e4)});</script></body></html>
 `,
     'categories.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการหมวดหมู่ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.category-image-thumb{width:50px;height:50px;object-fit:cover;border-radius:4px;margin-right:10px;background-color:#eee}th,td{vertical-align:middle}.alert-tooltip{cursor:help}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.image-preview{max-width:100px;max-height:80px;margin-top:5px;display:none;border:1px solid #ddd;padding:2px;border-radius:4px}</style></head><body><%- include('navbar', { pageTitle: 'Categories' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-tags-fill"></i> จัดการหมวดหมู่ (<%= categories.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCategoryModal"><i class="bi bi-plus-circle"></i> เพิ่มหมวดหมู่</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อหมวดหมู่</th><th>รายละเอียด</th><th class="text-center">สินค้า</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if(categories.length > 0){ %><% categories.forEach(category => { const modalId = "editCategoryModal" + category.name.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td><img src="<%= category.imageUrl || 'https://via.placeholder.com/50/dee2e6/6c757d?text=N/A' %>" alt="Img" class="category-image-thumb" onerror="this.onerror=null; this.src='https://via.placeholder.com/50/dee2e6/6c757d?text=N/A';"></td><td><%= category.name %></td><td><small><%= category.description || '-' %></small></td><td class="text-center"><span class="badge bg-secondary rounded-pill"><%= category.productCount %></span></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/categories/delete/<%= encodeURIComponent(category.name) %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" <%= category.productCount > 0 ? 'disabled' : '' %> onclick="return confirm('ยืนยันลบหมวดหมู่: <%= category.name %> ? (ต้องไม่มีสินค้าในหมวดนี้)')" title="<%= category.productCount > 0 ? 'ไม่สามารถลบได้ มีสินค้าอยู่ ' + category.productCount + ' รายการ' : 'ลบหมวดหมู่' %>"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="5" class="text-center text-muted py-3">ยังไม่มีหมวดหมู่</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Modal --><div class="modal fade" id="addCategoryModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/add"><div class="modal-header"><h5 class="modal-title">เพิ่มหมวดหมู่ใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">https://... .jpg, .png, .gif, .webp</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"></textarea></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่ม</button></div></form></div></div></div><!-- Edit Modals --><% categories.forEach(category => { const modalId = "editCategoryModal" + category.name.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/edit"><input type="hidden" name="originalName" value="<%= category.name %>"><div class="modal-header"><h5 class="modal-title">แก้ไข: <%= category.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อใหม่*</label><input type="text" name="newName" class="form-control" value="<%= category.name %>" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= category.imageUrl %>"><img src="<%= category.imageUrl %>" class="image-preview" style="<%= category.imageUrl ? 'display:block;' : '' %>" onerror="this.style.display='none';"><div class="form-text text-muted">https://... .jpg, .png, .gif, .webp</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= category.description %></textarea></div><div class="alert alert-warning small p-2"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนชื่อ จะอัปเดตสินค้าในหมวดนี้อัตโนมัติ</div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึก</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=e=>{const o=e.querySelector('.image-url-input'),n=e.querySelector('.image-preview');if(!o||!n)return;const i=()=>{const t=o.value.trim(),l=/^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp)([\?#].*)?$/i.test(t);l?(n.src=t,n.style.display='block',o.classList.remove('is-invalid'),n.onerror=()=>{n.style.display='none';o.classList.add('is-invalid')}) : (n.style.display='none',n.src='',t?o.classList.add('is-invalid'):o.classList.remove('is-invalid'))};o.addEventListener('input',i),o.dispatchEvent(new Event('input'))};document.querySelectorAll('.modal').forEach(t);const e=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(t){}},1e4)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการหมวดหมู่ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.category-image-thumb{width:50px;height:50px;object-fit:cover;border-radius:4px;margin-right:10px;background-color:#eee}th,td{vertical-align:middle}.alert-tooltip{cursor:help}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.image-preview{max-width:100px;max-height:80px;margin-top:5px;display:none;border:1px solid #ddd;padding:2px;border-radius:4px}</style></head><body><%- include('navbar', { pageTitle: 'Categories' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-tags-fill"></i> จัดการหมวดหมู่ (<%= categories.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCategoryModal"><i class="bi bi-plus-circle"></i> เพิ่มหมวดหมู่</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อหมวดหมู่</th><th>รายละเอียด</th><th class="text-center">สินค้า</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if(categories.length > 0){ %><% categories.forEach(category => { const modalId = "editCategoryModal" + category.name.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td><img src="<%= category.imageUrl || 'https://via.placeholder.com/50/dee2e6/6c757d?text=N/A' %>" alt="Img" class="category-image-thumb" onerror="this.onerror=null; this.src='https://via.placeholder.com/50/dee2e6/6c757d?text=N/A';"></td><td><%= category.name %></td><td><small><%= category.description || '-' %></small></td><td class="text-center"><span class="badge bg-secondary rounded-pill"><%= category.productCount %></span></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/categories/delete/<%= encodeURIComponent(category.name) %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" <%= category.productCount > 0 ? 'disabled' : '' %> onclick="return confirm('ยืนยันลบหมวดหมู่: <%= category.name %> ? (ต้องไม่มีสินค้าในหมวดนี้)')" title="<%= category.productCount > 0 ? 'ไม่สามารถลบได้ มีสินค้าอยู่ ' + category.productCount + ' รายการ' : 'ลบหมวดหมู่' %>"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="5" class="text-center text-muted py-3">ยังไม่มีหมวดหมู่</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Modal --><div class="modal fade" id="addCategoryModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/add"><div class="modal-header"><h5 class="modal-title">เพิ่มหมวดหมู่ใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">http/https://... .jpg, .png, .gif, .webp etc.</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"></textarea></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่ม</button></div></form></div></div></div><!-- Edit Modals --><% categories.forEach(category => { const modalId = "editCategoryModal" + category.name.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/edit"><input type="hidden" name="originalName" value="<%= category.name %>"><div class="modal-header"><h5 class="modal-title">แก้ไข: <%= category.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อใหม่*</label><input type="text" name="newName" class="form-control" value="<%= category.name %>" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= category.imageUrl %>"><img src="<%= category.imageUrl %>" class="image-preview" style="<%= category.imageUrl ? 'display:block;' : '' %>" onerror="this.style.display='none';"><div class="form-text text-muted">http/https://... .jpg, .png, .gif, .webp etc.</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= category.description %></textarea></div><div class="alert alert-warning small p-2"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนชื่อ จะอัปเดตสินค้าในหมวดนี้อัตโนมัติ</div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึก</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=e=>{const o=e.querySelector('.image-url-input'),n=e.querySelector('.image-preview');if(!o||!n)return;const i=()=>{const t=o.value.trim(),l=/^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp|bmp|svg)([\?#].*)?$/i.test(t);l?(n.src=t,n.style.display='block',o.classList.remove('is-invalid'),n.onerror=()=>{n.style.display='none';o.classList.add('is-invalid')}) : (n.style.display='none',n.src='',t?o.classList.add('is-invalid'):o.classList.remove('is-invalid'))};o.addEventListener('input',i),o.dispatchEvent(new Event('input'))};document.querySelectorAll('.modal').forEach(t);const e=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(t){}},1e4)});</script></body></html>
 `,
     'orders.ejs': `
 <!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการคำสั่งซื้อ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>th,td{vertical-align:middle;font-size:.9rem}.item-list{list-style:none;padding-left:0;margin-bottom:0}.item-list li{font-size:.85rem}.status-select{min-width:120px}.order-row{border-left:4px solid transparent;transition:border-color .3s ease,background-color .3s ease}.order-row:target{border-left-color:#0d6efd;background-color:#e7f1ff}body{padding-top:70px;background-color:#f8f9fa}.confirmation-link{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle}.btn-action form{display:inline}</style></head><body><%- include('navbar', { pageTitle: 'Orders' }) %><div class="container mt-4"><h2><i class="bi bi-receipt-cutoff"></i> จัดการคำสั่งซื้อ (<%= orders.length %> รายการ)</h2><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card mt-3 shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover table-bordered mb-0"><thead class="table-light"><tr><th>#</th><th>รหัสสั่งซื้อ</th><th>ลูกค้า</th><th>รายการ (ชื่อ x จำนวน)</th><th>ยอดจ่าย (฿)</th><th>ส่วนลด</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่</th><th>ข้อมูลยืนยัน</th><th>จัดการ</th></tr></thead><tbody><% if(orders.length > 0){ %><% orders.forEach((order, index) => { const finalAmount = order.finalAmount !== undefined ? order.finalAmount : ((order.originalTotalAmount || 0) - (order.discountAmount || 0)); %><tr class="order-row" id="order-<%= order.id %>"><td><%= index + 1 %></td><td><small title="<%= order.id %>"><%= order.id.substring(0,16) %>...</small></td><td><small title="<%= order.userId %>"><%= order.userId.substring(0,6) %>...<%= order.userId.slice(-4) %></small></td><td><ul class="item-list"><% (order.items || []).forEach(item => { %><li><small title="ID: <%= item.productId %>"><b><%= item.name %></b> x <%= item.quantity %></small></li><% }) %></ul></td><td><b><%= finalAmount.toFixed(2) %></b></td><td><% if (order.discountAmount && order.discountAmount > 0) { %><span class="badge bg-danger" title="Code: <%= order.discountCode || 'N/A' %>">฿<%= order.discountAmount.toFixed(2) %></span><br><small class="text-muted"><%= order.discountCode %><% if (order.discountCode === 'AUTO_PROMO') { %> <i class="bi bi-stars text-warning" title="โปรโมชั่นอัตโนมัติ"></i><% } %></small><% } else { %><span class="text-muted">-</span><% } %></td><td><span class="badge bg-<%= order.paymentMethod==='angpao'?'danger':order.paymentMethod==='bank'?'info':order.paymentMethod==='redeem_code'?'primary':'secondary' %> text-capitalize"><i class="bi bi-<%= order.paymentMethod==='angpao'?'gift':order.paymentMethod==='bank'?'bank':order.paymentMethod==='redeem_code'?'key':'question-circle' %>"></i> <%= order.paymentMethod || 'N/A' %></span></td><td><form method="POST" action="/admin/orders/status/<%= order.id %>" class="d-inline-block"><select name="status" class="form-select form-select-sm status-select" onchange="this.form.submit()" title="เปลี่ยนสถานะ"><option value="pending" <%=order.status==='pending'?'selected':'' %>>⏳ รอดำเนินการ</option><option value="processing" <%=order.status==='processing'?'selected':'' %>>🔄 กำลังเตรียม</option><option value="completed" <%=order.status==='completed'?'selected':'' %>>✔️ สำเร็จ</option><option value="cancelled" <%=order.status==='cancelled'?'selected':'' %>>❌ ยกเลิก</option><option value="shipped" <%=order.status==='shipped'?'selected':'' %>>🚚 จัดส่งแล้ว</option><option value="refunded" <%=order.status==='refunded'?'selected':'' %>>💸 คืนเงิน</option></select></form></td><td><small title="Created: <%= new Date(order.createdAt || 0).toLocaleString('th-TH') %> | Updated: <%= new Date(order.updatedAt || 0).toLocaleString('th-TH') %>"><%= new Date(order.createdAt || 0).toLocaleString('th-TH', { dateStyle:'short', timeStyle:'short'}) %></small></td><td class="text-center"><% if(order.paymentConfirmation && (String(order.paymentConfirmation).startsWith('http'))){ %><a href="<%= order.paymentConfirmation %>" target="_blank" class="btn btn-sm btn-outline-secondary confirmation-link" title="ดู: <%= order.paymentConfirmation %>"><i class="bi bi-link-45deg"></i> ลิงก์/สลิป</a><% } else if(order.paymentConfirmation){ %><span class="badge bg-light text-dark" title="Ref/Code: <%= order.paymentConfirmation %>"><small><%= String(order.paymentConfirmation).substring(0,15) %>...</small></span><% } else { %> <span class="text-muted">-</span> <% } %></td><td class="text-center btn-action"><form method="POST" action="/admin/orders/delete/<%= order.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('ยืนยันลบคำสั่งซื้อ: <%= order.id %> ?')" title="ลบคำสั่งซื้อนี้"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="11" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){if(window.location.hash){const e=document.querySelector(window.location.hash);if(e){e.scrollIntoView({behavior:'smooth',block:'center'});e.style.transition='background-color 0.5s ease-in-out';e.style.backgroundColor='#e7f1ff';setTimeout(()=>{e.style.backgroundColor='transparent'},1500)}};const t=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');t&&setTimeout(()=>{try{new bootstrap.Alert(t).close()}catch(e){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(e){}},1e4)});</script></body></html>
@@ -2883,7 +3139,7 @@ const templates = {
 <!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการโค้ดรับของ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>body{padding-top:70px;background-color:#f8f9fa}.code-list{max-height:60vh;overflow-y:auto}.code-item{font-family:monospace;word-break:break-all}</style></head><body><%- include('navbar', { pageTitle: 'Redemption Codes' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-key-fill"></i> จัดการโค้ดรับของ (<%= codes.length %> โค้ด)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCodeModal"><i class="bi bi-plus-circle"></i> เพิ่ม/สร้างโค้ด</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-header bg-light">รายการโค้ด (32 ตัวอักษร A-Z, 0-9)</div><div class="card-body"><% if(codes.length > 0){ %><div class="code-list border rounded p-3 mb-3"><ul class="list-group list-group-flush"><% codes.forEach(code => { %><li class="list-group-item d-flex justify-content-between align-items-center"><span class="code-item"><%= code %></span><form method="POST" action="/admin/codes/delete/<%= code %>" class="ms-2 d-inline"><button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('ยืนยันลบโค้ด: <%= code %> ?')" title="ลบโค้ดนี้"><i class="bi bi-trash3"></i></button></form></li><% }) %></ul></div><p class="text-muted small">โค้ดที่ใช้แล้วจะถูกลบอัตโนมัติเมื่อลูกค้าใช้งานสำเร็จ</p><% } else { %><p class="text-center text-muted py-3">ยังไม่มีโค้ดรับของในระบบ</p><% } %></div></div></div><!-- Add Code Modal --><div class="modal fade" id="addCodeModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/codes/add"><div class="modal-header"><h5 class="modal-title">เพิ่ม หรือ สร้างโค้ด</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label for="manualCode" class="form-label">เพิ่มโค้ดเอง (32 ตัว)</label><input type="text" name="code" id="manualCode" class="form-control text-uppercase" pattern="[A-Z0-9]{32}" title="ต้องเป็น A-Z หรือ 0-9 จำนวน 32 ตัว" placeholder="เว้นว่างเพื่อสร้างอัตโนมัติ"><div class="form-text">ต้องเป็น A-Z, 0-9 จำนวน 32 ตัวเท่านั้น.</div></div><hr><div class="mb-3"><label for="generateCount" class="form-label">สร้างอัตโนมัติ (จำนวน)</label><input type="number" name="count" id="generateCount" class="form-control" min="1" max="1000" value="10"><div class="form-text">ระบุจำนวน (1-1000) ระบบจะสร้างให้หากช่องบนเว้นว่าง</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่ม/สร้าง</button></div></form></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=document.querySelector('.alert-success'),e=document.querySelector('.alert-danger');t&&setTimeout(()=>{try{new bootstrap.Alert(t).close()}catch(t){}},7e3),e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},1e4)});</script></body></html>
 `,
     'settings.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ตั้งค่าระบบ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>body{padding-top:70px;background-color:#f8f9fa}textarea{font-family:monospace}.form-text{font-size:.875em}.form-check-input:checked{background-color:#198754;border-color:#198754}.alert i { vertical-align: -0.125em; } </style></head><body><%- include('navbar', { pageTitle: 'Settings' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-gear-wide-connected"></i> ตั้งค่าระบบ</h2></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%- error.replace(/\\\\n/g, '<br>') %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><form method="POST" action="/admin/settings/save"><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-facebook"></i> Facebook Messenger</strong></div><div class="card-body"><!-- Connection Status --><div id="connection-status" class="alert alert-<%= connectionStatus.status === 'success' ? 'success' : 'danger' %>" role="alert"><strong>สถานะเชื่อมต่อ Facebook:</strong> <%= connectionStatus.message %></div><div class="row"><div class="col-md-6 mb-3"><label for="fbVerifyToken" class="form-label">Verify Token*</label><input type="text" class="form-control" id="fbVerifyToken" name="fbVerifyToken" value="<%= config.fbVerifyToken %>" required><div class="form-text">ต้องตรงกับที่ตั้งใน Facebook App Webhook setup</div></div><div class="col-md-6 mb-3"><label for="adminContactLink" class="form-label">ลิงก์ติดต่อแอดมิน</label><input type="url" class="form-control" id="adminContactLink" name="adminContactLink" value="<%= config.adminContactLink %>" placeholder="https://m.me/YOUR_PAGE_ID"><div class="form-text">ลิงก์ m.me สำหรับปุ่มติดต่อแอดมิน (ถ้ามี)</div></div></div><div class="mb-3"><label for="fbPageAccessToken" class="form-label">Page Access Token</label><textarea class="form-control" id="fbPageAccessToken" name="fbPageAccessToken" rows="3"><%= config.fbPageAccessToken %></textarea><div class="form-text">Token ที่สร้างจาก Facebook App สำหรับเพจของคุณ (ควรใช้แบบอายุยาว)</div></div><div class="mb-3"><label for="welcomeGif" class="form-label">Welcome GIF URL</label><input type="url" class="form-control" id="welcomeGif" name="welcomeGif" value="<%= config.welcomeGif %>"><div class="form-text">URL รูป GIF ต้อนรับ (แนะนำ .gif ขนาดไม่ใหญ่มาก)</div></div></div></div><!-- Server Settings --><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-hdd-network-fill"></i> Server & Connection</strong> <small>(**ต้องรีสตาร์ทเซิร์ฟเวอร์** หากแก้ไขส่วนนี้)</small></div><div class="card-body"><div class="row"><div class="col-md-4 mb-3"><label for="serverPort" class="form-label">Server Port*</label><input type="number" class="form-control" id="serverPort" name="serverPort" value="<%= config.serverPort %>" min="1" max="65535" required><div class="form-text">Port ที่เซิร์ฟเวอร์จะทำงาน (เช่น 3000 หรือ 8443)</div></div><div class="col-md-8 mb-3 align-self-center"><div class="form-check form-switch pt-3"><input class="form-check-input" type="checkbox" role="switch" id="enableHttps" name="enableHttps" <%= config.enableHttps ? 'checked' : '' %>><label class="form-check-label" for="enableHttps">เปิดใช้งาน HTTPS (แนะนำ)</label></div></div></div><div class="row"><div class="col-md-6 mb-3"><label for="sslKeyPath" class="form-label">SSL Private Key Path (.pem)</label><input type="text" class="form-control" id="sslKeyPath" name="sslKeyPath" value="<%= config.sslKeyPath %>" placeholder="/path/to/your/privkey.pem" <%= !config.enableHttps ? 'disabled' : '' %>><div class="form-text">ที่อยู่ไฟล์ Private Key (จำเป็นหากเปิด HTTPS)</div></div><div class="col-md-6 mb-3"><label for="sslCertPath" class="form-label">SSL Certificate Path (.pem)</label><input type="text" class="form-control" id="sslCertPath" name="sslCertPath" value="<%= config.sslCertPath %>" placeholder="/path/to/your/fullchain.pem" <%= !config.enableHttps ? 'disabled' : '' %>><div class="form-text">ที่อยู่ไฟล์ Certificate Chain (จำเป็นหากเปิด HTTPS)</div></div></div><div class="alert alert-warning small p-2"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนแปลง Port หรือ HTTPS **ต้องรีสตาร์ทเซิร์ฟเวอร์** เพื่อให้มีผลสมบูรณ์</div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-megaphone-fill"></i> โปรโมชั่นอัตโนมัติ (ลดทั้งร้าน)</strong></div><div class="card-body"><div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="autoPromotionEnabled" name="autoPromotionEnabled" <%= config.autoPromotionEnabled ? 'checked' : '' %>><label class="form-check-label" for="autoPromotionEnabled">เปิดใช้งานโปรโมชั่นอัตโนมัติ</label></div><div class="row"><div class="col-md-6 mb-3"><label for="autoPromotionPercentage" class="form-label">เปอร์เซ็นต์ส่วนลด (%)</label><input type="number" class="form-control" id="autoPromotionPercentage" name="autoPromotionPercentage" value="<%= config.autoPromotionPercentage %>" min="0" max="100" step="0.1"><div class="form-text">ใส่ค่าระหว่าง 0-100 (เช่น 10 สำหรับ 10%)</div></div><div class="col-md-6 mb-3"><label for="autoPromotionMinPurchase" class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" class="form-control" id="autoPromotionMinPurchase" name="autoPromotionMinPurchase" value="<%= config.autoPromotionMinPurchase %>" min="0" step="0.01"><div class="form-text">ยอดซื้อขั้นต่ำในตะกร้าเพื่อรับส่วนลด (0 = ไม่มีขั้นต่ำ)</div></div></div><div class="alert alert-info small p-2"><i class="bi bi-info-circle"></i> หากเปิดใช้งาน ลูกค้าที่มียอดถึงขั้นต่ำจะได้รับส่วนลดนี้ทันที และจะไม่สามารถใช้โค้ดส่วนลดอื่นได้</div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-wallet2"></i> TrueMoney Wallet (Angpao)</strong></div><div class="card-body"><div class="row"><div class="col-md-6 mb-3"><label for="walletPhone" class="form-label">เบอร์ Wallet ร้านค้า (สำหรับรับซอง)*</label><input type="text" class="form-control" id="walletPhone" name="walletPhone" value="<%= config.walletPhone %>" pattern="[0-9]{10}" title="ใส่เบอร์โทรศัพท์ 10 หลัก" required><div class="form-text"><strong>สำคัญ:</strong> เบอร์ TrueMoney ที่บอทใช้กดรับเงินจากซองอั่งเปาที่ลูกค้าส่งมา</div></div><div class="col-md-6 mb-3"><label for="walletImage" class="form-label">Wallet Image URL</label><input type="url" class="form-control" id="walletImage" name="walletImage" value="<%= config.walletImage %>"><div class="form-text">URL รูปภาพสำหรับตัวเลือกจ่ายผ่าน Wallet</div></div></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-bank"></i> Bank Transfer</strong></div><div class="card-body"><div class="mb-3"><label for="bankAccountDetails" class="form-label">ข้อมูลบัญชีธนาคาร*</label><textarea class="form-control" id="bankAccountDetails" name="bankAccountDetails" rows="4" required><%= config.bankAccountDetails %></textarea><div class="form-text">แสดงให้ลูกค้าเห็นตอนเลือกโอนเงิน (ใส่ ธนาคาร, เลขบัญชี, ชื่อบัญชี)</div></div><div class="mb-3"><label for="bankImage" class="form-label">Bank Logo Image URL</label><input type="url" class="form-control" id="bankImage" name="bankImage" value="<%= config.bankImage %>"><div class="form-text">URL รูปโลโก้ธนาคาร</div></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-receipt"></i> Xncly Slip Check API</strong> <small>(สำหรับ Bank Transfer)</small></div><div class="card-body"><div class="mb-3"><label for="xnclyClientIdSecret" class="form-label">Xncly ClientID:Secret*</label><input type="text" class="form-control" id="xnclyClientIdSecret" name="xnclyClientIdSecret" value="<%= config.xnclyClientIdSecret %>" placeholder="ClientID:Secret" required><div class="form-text">รูปแบบ ClientID:Secret จาก <a href="https://xncly.xyz/" target="_blank">xncly.xyz</a></div></div><div class="mb-3"><label for="xnclyCheckUrl" class="form-label">Xncly Check URL*</label><input type="url" class="form-control" id="xnclyCheckUrl" name="xnclyCheckUrl" value="<%= config.xnclyCheckUrl %>" required></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-key-fill"></i> Code Redemption & <i class="bi bi-percent"></i> Discounts Images</strong></div><div class="card-body"><div class="row"><div class="col-md-6 mb-3"><label for="codeRedemptionImage" class="form-label">Code Redemption Image URL</label><input type="url" class="form-control" id="codeRedemptionImage" name="codeRedemptionImage" value="<%= config.codeRedemptionImage %>"><div class="form-text">URL รูปภาพสำหรับตัวเลือกใช้โค้ดรับของ</div></div><div class="col-md-6 mb-3"><label for="discountImage" class="form-label">Discount Feature Image URL</label><input type="url" class="form-control" id="discountImage" name="discountImage" value="<%= config.discountImage %>"><div class="form-text">URL รูปภาพ (อาจใช้แสดงผลเกี่ยวกับส่วนลด)</div></div></div></div></div><div class="text-center mb-4"><button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-save-fill"></i> บันทึกการตั้งค่าทั้งหมด</button></div></form></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded', function() { const httpsSwitch = document.getElementById('enableHttps'); const keyPathInput = document.getElementById('sslKeyPath'); const certPathInput = document.getElementById('sslCertPath'); function toggleSslInputs() { const isEnabled = httpsSwitch.checked; keyPathInput.disabled = !isEnabled; certPathInput.disabled = !isEnabled; keyPathInput.required = isEnabled; certPathInput.required = isEnabled; } httpsSwitch.addEventListener('change', toggleSslInputs); toggleSslInputs(); const successAlert = document.querySelector('.alert-success'); const errorAlert = document.querySelector('.alert-danger'); if (successAlert) { setTimeout(() => { try { new bootstrap.Alert(successAlert).close(); } catch (e) {} }, 7000); } if (errorAlert) { setTimeout(() => { try { new bootstrap.Alert(errorAlert).close(); } catch (e) {} }, 15000); } });</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ตั้งค่าระบบ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>body{padding-top:70px;background-color:#f8f9fa}textarea{font-family:monospace}.form-text{font-size:.875em}.form-check-input:checked{background-color:#198754;border-color:#198754}.alert i { vertical-align: -0.125em; } </style></head><body><%- include('navbar', { pageTitle: 'Settings' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-gear-wide-connected"></i> ตั้งค่าระบบ</h2></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%- error.replace(/\\\\n/g, '<br>') %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><form method="POST" action="/admin/settings/save"><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-facebook"></i> Facebook Messenger</strong></div><div class="card-body"><!-- Connection Status --><div id="connection-status" class="alert alert-<%= connectionStatus.status === 'success' ? 'success' : 'danger' %>" role="alert"><strong>สถานะเชื่อมต่อ Facebook:</strong> <%= connectionStatus.message %></div><div class="row"><div class="col-md-6 mb-3"><label for="fbVerifyToken" class="form-label">Verify Token*</label><input type="text" class="form-control" id="fbVerifyToken" name="fbVerifyToken" value="<%= config.fbVerifyToken %>" required><div class="form-text">ต้องตรงกับที่ตั้งใน Facebook App Webhook setup</div></div><div class="col-md-6 mb-3"><label for="adminContactLink" class="form-label">ลิงก์ติดต่อแอดมิน</label><input type="url" class="form-control" id="adminContactLink" name="adminContactLink" value="<%= config.adminContactLink %>" placeholder="https://m.me/YOUR_PAGE_ID"><div class="form-text">ลิงก์ m.me สำหรับปุ่มติดต่อแอดมิน (ถ้ามี)</div></div></div><div class="mb-3"><label for="fbPageAccessToken" class="form-label">Page Access Token</label><textarea class="form-control" id="fbPageAccessToken" name="fbPageAccessToken" rows="3"><%= config.fbPageAccessToken %></textarea><div class="form-text">Token ที่สร้างจาก Facebook App สำหรับเพจของคุณ (ควรใช้แบบอายุยาว)</div></div><div class="mb-3"><label for="welcomeGif" class="form-label">Welcome GIF URL</label><input type="url" class="form-control" id="welcomeGif" name="welcomeGif" value="<%= config.welcomeGif %>"><div class="form-text">URL รูป GIF ต้อนรับ (แนะนำ .gif ขนาดไม่ใหญ่มาก)</div></div></div></div><!-- Server Settings --><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-hdd-network-fill"></i> Server & Connection</strong> <small>(**ต้องรีสตาร์ทเซิร์ฟเวอร์** หากแก้ไขส่วนนี้)</small></div><div class="card-body"><div class="row"><div class="col-md-4 mb-3"><label for="serverPort" class="form-label">Server Port*</label><input type="number" class="form-control" id="serverPort" name="serverPort" value="<%= config.serverPort %>" min="1" max="65535" required><div class="form-text">Port ที่เซิร์ฟเวอร์จะทำงาน (เช่น 3000 หรือ 8443)</div></div><div class="col-md-8 mb-3 align-self-center"><div class="form-check form-switch pt-3"><input class="form-check-input" type="checkbox" role="switch" id="enableHttps" name="enableHttps" <%= config.enableHttps ? 'checked' : '' %>><label class="form-check-label" for="enableHttps">เปิดใช้งาน HTTPS (แนะนำ)</label></div></div></div><div class="row"><div class="col-md-6 mb-3"><label for="sslKeyPath" class="form-label">SSL Private Key Path (.pem)</label><input type="text" class="form-control" id="sslKeyPath" name="sslKeyPath" value="<%= config.sslKeyPath %>" placeholder="/path/to/your/privkey.pem" <%= !config.enableHttps ? 'disabled' : '' %>><div class="form-text">ที่อยู่ไฟล์ Private Key (จำเป็นหากเปิด HTTPS)</div></div><div class="col-md-6 mb-3"><label for="sslCertPath" class="form-label">SSL Certificate Path (.pem)</label><input type="text" class="form-control" id="sslCertPath" name="sslCertPath" value="<%= config.sslCertPath %>" placeholder="/path/to/your/fullchain.pem" <%= !config.enableHttps ? 'disabled' : '' %>><div class="form-text">ที่อยู่ไฟล์ Certificate Chain (จำเป็นหากเปิด HTTPS)</div></div></div><div class="alert alert-warning small p-2"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนแปลง Port หรือ HTTPS **ต้องรีสตาร์ทเซิร์ฟเวอร์** เพื่อให้มีผลสมบูรณ์</div></div></div><!-- AI Chat Settings --><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-robot"></i> AI Chat (ตอบคำถามอัตโนมัติ)</strong></div><div class="card-body"><div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="aiChatEnabled" name="aiChatEnabled" <%= config.aiChatEnabled ? 'checked' : '' %>><label class="form-check-label" for="aiChatEnabled">เปิดใช้งาน AI Chat</label></div><div class="row"><div class="col-md-6 mb-3"><label for="aiApiKey" class="form-label">AI API Key</label><input type="password" class="form-control" id="aiApiKey" name="aiApiKey" value="<%= config.aiApiKey %>" placeholder="ใส่ API Key (จำเป็นหากเปิดใช้งาน)" <%= !config.aiChatEnabled ? 'disabled' : '' %>><div class="form-text">API Key จากผู้ให้บริการ AI (เช่น Easy-Peasy AI). <strong>ต้องระบุหากเปิดใช้งาน.</strong></div></div><div class="col-md-6 mb-3"><label for="aiApiUrl" class="form-label">AI API URL</label><input type="url" class="form-control" id="aiApiUrl" name="aiApiUrl" value="<%= config.aiApiUrl %>" placeholder="https://... (จำเป็นหากเปิดใช้งาน)" <%= !config.aiChatEnabled ? 'disabled' : '' %>><div class="form-text">URL ของ Endpoint AI Chat API. <strong>ต้องระบุหากเปิดใช้งาน.</strong></div></div></div><div class="alert alert-info small p-2"><i class="bi bi-info-circle"></i> หากเปิดใช้งาน บอทจะพยายามตอบคำถามทั่วไปที่ไม่ได้อยู่ในคำสั่งหลักโดยใช้ AI</div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-megaphone-fill"></i> โปรโมชั่นอัตโนมัติ (ลดทั้งร้าน)</strong></div><div class="card-body"><div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="autoPromotionEnabled" name="autoPromotionEnabled" <%= config.autoPromotionEnabled ? 'checked' : '' %>><label class="form-check-label" for="autoPromotionEnabled">เปิดใช้งานโปรโมชั่นอัตโนมัติ</label></div><div class="row"><div class="col-md-6 mb-3"><label for="autoPromotionPercentage" class="form-label">เปอร์เซ็นต์ส่วนลด (%)</label><input type="number" class="form-control" id="autoPromotionPercentage" name="autoPromotionPercentage" value="<%= config.autoPromotionPercentage %>" min="0" max="100" step="0.1"><div class="form-text">ใส่ค่าระหว่าง 0-100 (เช่น 10 สำหรับ 10%)</div></div><div class="col-md-6 mb-3"><label for="autoPromotionMinPurchase" class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" class="form-control" id="autoPromotionMinPurchase" name="autoPromotionMinPurchase" value="<%= config.autoPromotionMinPurchase %>" min="0" step="0.01"><div class="form-text">ยอดซื้อขั้นต่ำในตะกร้าเพื่อรับส่วนลด (0 = ไม่มีขั้นต่ำ)</div></div></div><div class="alert alert-info small p-2"><i class="bi bi-info-circle"></i> หากเปิดใช้งาน ลูกค้าที่มียอดถึงขั้นต่ำจะได้รับส่วนลดนี้ทันที และจะไม่สามารถใช้โค้ดส่วนลดอื่นได้</div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-wallet2"></i> TrueMoney Wallet (Angpao)</strong></div><div class="card-body"><div class="row"><div class="col-md-6 mb-3"><label for="walletPhone" class="form-label">เบอร์ Wallet ร้านค้า (สำหรับรับซอง)*</label><input type="text" class="form-control" id="walletPhone" name="walletPhone" value="<%= config.walletPhone %>" pattern="[0-9]{10}" title="ใส่เบอร์โทรศัพท์ 10 หลัก" required><div class="form-text"><strong>สำคัญ:</strong> เบอร์ TrueMoney ที่บอทใช้กดรับเงินจากซองอั่งเปาที่ลูกค้าส่งมา</div></div><div class="col-md-6 mb-3"><label for="walletImage" class="form-label">Wallet Image URL</label><input type="url" class="form-control" id="walletImage" name="walletImage" value="<%= config.walletImage %>"><div class="form-text">URL รูปภาพสำหรับตัวเลือกจ่ายผ่าน Wallet</div></div></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-bank"></i> Bank Transfer</strong></div><div class="card-body"><div class="mb-3"><label for="bankAccountDetails" class="form-label">ข้อมูลบัญชีธนาคาร*</label><textarea class="form-control" id="bankAccountDetails" name="bankAccountDetails" rows="4" required><%= config.bankAccountDetails %></textarea><div class="form-text">แสดงให้ลูกค้าเห็นตอนเลือกโอนเงิน (ใส่ ธนาคาร, เลขบัญชี, ชื่อบัญชี)</div></div><div class="mb-3"><label for="bankImage" class="form-label">Bank Logo Image URL</label><input type="url" class="form-control" id="bankImage" name="bankImage" value="<%= config.bankImage %>"><div class="form-text">URL รูปโลโก้ธนาคาร</div></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-receipt"></i> Xncly Slip Check API</strong> <small>(สำหรับ Bank Transfer)</small></div><div class="card-body"><div class="mb-3"><label for="xnclyClientIdSecret" class="form-label">Xncly ClientID:Secret</label><input type="text" class="form-control" id="xnclyClientIdSecret" name="xnclyClientIdSecret" value="<%= config.xnclyClientIdSecret %>" placeholder="ClientID:Secret"><div class="form-text">รูปแบบ ClientID:Secret จาก <a href="https://xncly.xyz/" target="_blank">xncly.xyz</a> (จำเป็นหากใช้โอนเงิน)</div></div><div class="mb-3"><label for="xnclyCheckUrl" class="form-label">Xncly Check URL*</label><input type="url" class="form-control" id="xnclyCheckUrl" name="xnclyCheckUrl" value="<%= config.xnclyCheckUrl %>" required></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-key-fill"></i> Code Redemption & <i class="bi bi-percent"></i> Discounts Images</strong></div><div class="card-body"><div class="row"><div class="col-md-6 mb-3"><label for="codeRedemptionImage" class="form-label">Code Redemption Image URL</label><input type="url" class="form-control" id="codeRedemptionImage" name="codeRedemptionImage" value="<%= config.codeRedemptionImage %>"><div class="form-text">URL รูปภาพสำหรับตัวเลือกใช้โค้ดรับของ</div></div><div class="col-md-6 mb-3"><label for="discountImage" class="form-label">Discount Feature Image URL</label><input type="url" class="form-control" id="discountImage" name="discountImage" value="<%= config.discountImage %>"><div class="form-text">URL รูปภาพ (อาจใช้แสดงผลเกี่ยวกับส่วนลด)</div></div></div></div></div><div class="text-center mb-4"><button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-save-fill"></i> บันทึกการตั้งค่าทั้งหมด</button></div></form></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded', function() { const httpsSwitch = document.getElementById('enableHttps'); const keyPathInput = document.getElementById('sslKeyPath'); const certPathInput = document.getElementById('sslCertPath'); const aiSwitch = document.getElementById('aiChatEnabled'); const aiKeyInput = document.getElementById('aiApiKey'); const aiUrlInput = document.getElementById('aiApiUrl'); function toggleSslInputs() { const isEnabled = httpsSwitch.checked; keyPathInput.disabled = !isEnabled; certPathInput.disabled = !isEnabled; keyPathInput.required = isEnabled; // Only required if HTTPS is on certPathInput.required = isEnabled; } function toggleAiInputs() { const isEnabled = aiSwitch.checked; aiKeyInput.disabled = !isEnabled; aiUrlInput.disabled = !isEnabled; aiKeyInput.required = isEnabled; // Only required if AI is on aiUrlInput.required = isEnabled; } httpsSwitch.addEventListener('change', toggleSslInputs); aiSwitch.addEventListener('change', toggleAiInputs); toggleSslInputs(); // Initial check toggleAiInputs(); // Initial check for AI fields const successAlert = document.querySelector('.alert-success'); const errorAlert = document.querySelector('.alert-danger'); if (successAlert) { setTimeout(() => { try { new bootstrap.Alert(successAlert).close(); } catch (e) {} }, 7000); } if (errorAlert) { setTimeout(() => { try { new bootstrap.Alert(errorAlert).close(); } catch (e) {} }, 15000); } });</script></body></html>
 `,
     'discounts.ejs': `
 <!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการโค้ดส่วนลด - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>th,td{vertical-align:middle;font-size:.9rem}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.form-text{font-size:.875em}.code-input{text-transform:uppercase;font-family:monospace}.expired{color:#6c757d; text-decoration: line-through;}.used-up{color:#6c757d; font-style: italic;}</style></head><body><%- include('navbar', { pageTitle: 'Discount Codes' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-percent"></i> จัดการโค้ดส่วนลด (<%= discounts.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addDiscountModal"><i class="bi bi-plus-circle"></i> เพิ่มโค้ดส่วนลด</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%- error.replace(/\\\\n/g, '<br>') %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>โค้ด</th><th>ประเภท</th><th>มูลค่า</th><th>ใช้ไป/จำกัด</th><th>ซื้อขั้นต่ำ(฿)</th><th>วันหมดอายุ</th><th>จัดการ</th></tr></thead><tbody><% if(discounts.length > 0){ %><% discounts.forEach(discount => { const isExpired = discount.expiresAt && new Date(discount.expiresAt) < new Date(); const isUsedUp = discount.maxUses !== null && (discount.uses || 0) >= discount.maxUses; const isInactive = isExpired || isUsedUp; const modalId = "editDiscountModal" + discount.id.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td class="<%= isInactive ? 'text-muted' : '' %> <%= isExpired ? 'expired' : (isUsedUp ? 'used-up' : '') %>"><%= discount.code %><% if (isExpired){ %><span class="badge bg-secondary ms-1">หมดอายุ</span><% } else if (isUsedUp){ %><span class="badge bg-secondary ms-1">ใช้ครบ</span><% } %></td><td class="text-capitalize"><%= discount.type %></td><td><%= discount.type === 'percentage' ? discount.value + '%' : '฿' + discount.value.toFixed(2) %></td><td><%= discount.uses || 0 %> / <%= discount.maxUses === null ? '∞' : discount.maxUses %></td><td><%= discount.minPurchase > 0 ? discount.minPurchase.toFixed(2) : '-' %></td><td><%= discount.expiresAt ? new Date(discount.expiresAt).toLocaleDateString('th-TH', { year:'numeric', month:'short', day:'numeric'}) : '-' %></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/discounts/delete/<%= discount.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('ยืนยันลบโค้ดส่วนลด: <%= discount.code %> ?')" title="ลบ"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีโค้ดส่วนลดในระบบ</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Discount Modal --><div class="modal fade" id="addDiscountModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/discounts/add"><div class="modal-header"><h5 class="modal-title">เพิ่มโค้ดส่วนลดใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label for="addCode" class="form-label">โค้ดส่วนลด*</label><input type="text" name="code" id="addCode" class="form-control code-input" required pattern="[A-Z0-9]{3,20}" title="3-20 ตัวอักษร A-Z หรือ 0-9 เท่านั้น"><div class="form-text">ตัวพิมพ์เล็กจะถูกแปลงเป็นพิมพ์ใหญ่ (3-20 ตัวอักษร)</div></div><div class="row"><div class="col-md-6 mb-3"><label for="addType" class="form-label">ประเภทส่วนลด*</label><select name="type" id="addType" class="form-select" required><option value="percentage" selected>เปอร์เซ็นต์ (%)</option><option value="fixed">จำนวนเงินคงที่ (฿)</option></select></div><div class="col-md-6 mb-3"><label for="addValue" class="form-label">มูลค่าส่วนลด*</label><input type="number" name="value" id="addValue" class="form-control" required step="any" min="0.01"><div class="form-text">เช่น 10 สำหรับ 10% หรือ 50 สำหรับ ฿50 (ต้องมากกว่า 0)</div></div></div><div class="row"><div class="col-md-4 mb-3"><label for="addMaxUses" class="form-label">จำนวนครั้งที่ใช้ได้สูงสุด</label><input type="number" name="maxUses" id="addMaxUses" class="form-control" min="1" placeholder="เว้นว่าง=ไม่จำกัด"></div><div class="col-md-4 mb-3"><label for="addMinPurchase" class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" name="minPurchase" id="addMinPurchase" class="form-control" step="0.01" min="0" value="0" placeholder="0 หรือเว้นว่าง=ไม่มีขั้นต่ำ"></div><div class="col-md-4 mb-3"><label for="addExpiresAt" class="form-label">วันหมดอายุ</label><input type="date" name="expiresAt" id="addExpiresAt" class="form-control"><div class="form-text">เว้นว่าง=ไม่มีหมดอายุ</div></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่มโค้ด</button></div></form></div></div></div><!-- Edit Discount Modals --><% discounts.forEach(discount => { const expiresValue = discount.expiresAt ? new Date(discount.expiresAt).toISOString().split('T')[0] : ''; const modalId = "editDiscountModal" + discount.id.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/discounts/edit/<%= discount.id %>"><div class="modal-header"><h5 class="modal-title">แก้ไขโค้ด: <%= discount.code %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">โค้ดส่วนลด*</label><input type="text" name="code" class="form-control code-input" value="<%= discount.code %>" required pattern="[A-Z0-9]{3,20}" title="3-20 ตัวอักษร A-Z หรือ 0-9 เท่านั้น"></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ประเภทส่วนลด*</label><select name="type" class="form-select" required><option value="percentage" <%= discount.type === 'percentage' ? 'selected' : '' %>>เปอร์เซ็นต์ (%)</option><option value="fixed" <%= discount.type === 'fixed' ? 'selected' : '' %>>จำนวนเงินคงที่ (฿)</option></select></div><div class="col-md-6 mb-3"><label class="form-label">มูลค่าส่วนลด*</label><input type="number" name="value" class="form-control" value="<%= discount.value %>" required step="any" min="0.01"></div></div><div class="row"><div class="col-md-4 mb-3"><label class="form-label">จำนวนครั้งที่ใช้ได้สูงสุด</label><input type="number" name="maxUses" class="form-control" value="<%= discount.maxUses || '' %>" min="1" placeholder="เว้นว่าง=ไม่จำกัด"><div class="form-text">ใช้ไปแล้ว: <%= discount.uses || 0 %> ครั้ง</div></div><div class="col-md-4 mb-3"><label class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" name="minPurchase" class="form-control" value="<%= discount.minPurchase || '0' %>" step="0.01" min="0" placeholder="0=ไม่มีขั้นต่ำ"></div><div class="col-md-4 mb-3"><label class="form-label">วันหมดอายุ</label><input type="date" name="expiresAt" class="form-control" value="<%= expiresValue %>"><div class="form-text">เว้นว่าง=ไม่มีหมดอายุ</div></div></div><p class="small text-muted">ID: <%= discount.id %><br>Created: <%= new Date(discount.createdAt).toLocaleString('th-TH') %></p></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=document.querySelector('.alert-success'),e=document.querySelector('.alert-danger');t&&setTimeout(()=>{try{new bootstrap.Alert(t).close()}catch(t){}},7e3),e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},15e3)});</script></body></html>
@@ -2921,6 +3177,7 @@ function startServer() {
             if (!loadedConfig.sslKeyPath || !loadedConfig.sslCertPath) {
                 throw new Error("SSL Key Path or Cert Path is missing in config.");
             }
+            // Check read access first
             fs.accessSync(loadedConfig.sslKeyPath, fs.constants.R_OK);
             fs.accessSync(loadedConfig.sslCertPath, fs.constants.R_OK);
             const privateKey = fs.readFileSync(loadedConfig.sslKeyPath, 'utf8');
@@ -2943,6 +3200,7 @@ function startServer() {
     if (useHttps && credentials) {
         serverInstance = https.createServer(credentials, app);
         serverInstance.listen(PORT, () => {
+            // Try to guess domain from cert path for display purposes
             const domainMatch = String(loadedConfig.sslCertPath).match(/live\/([^\/]+)\//);
             const domain = domainMatch ? domainMatch[1] : 'YOUR_DOMAIN.COM';
             console.log(`---------------------------------------------------`);
@@ -2959,7 +3217,7 @@ function startServer() {
             console.warn(`⚠️ Running HTTP server on port ${PORT}. HTTPS is highly recommended!`);
             console.warn(`🔗 Admin Dashboard (HTTP): http://localhost:${PORT}/admin (or your server's IP)`);
             console.warn(`🔗 Webhook URL (HTTP): Requires tunneling (e.g., ngrok) for Facebook.`);
-            console.warn(`   Example (ngrok): https://<your-ngrok-id>.ngrok-free.app/webhook`); // Updated ngrok domain
+            console.warn(`   Example (ngrok): https://<your-ngrok-id>.ngrok-free.app/webhook`);
             console.warn(`   (Verify Token in FB App: ${loadedConfig.fbVerifyToken})`);
             console.warn(`   Configure HTTPS in /admin/settings for production & restart.`);
             console.warn(`---------------------------------------------------`);
@@ -2973,7 +3231,7 @@ function startServer() {
         const bind = typeof PORT === 'string' ? 'Pipe ' + PORT : 'Port ' + PORT;
         switch (error.code) {
             case 'EACCES':
-                console.error(`❌ FATAL ERROR: ${bind} requires elevated privileges.`);
+                console.error(`❌ FATAL ERROR: ${bind} requires elevated privileges (e.g., sudo for ports < 1024).`);
                 process.exit(1);
                 break;
             case 'EADDRINUSE':
@@ -2987,8 +3245,13 @@ function startServer() {
     });
 
     console.log(`ℹ️ Auto Promotion Status: ${loadedConfig.autoPromotionEnabled ? `ENABLED (${loadedConfig.autoPromotionPercentage}% over ${loadedConfig.autoPromotionMinPurchase} THB)` : 'DISABLED'}`);
-    if (loadedConfig.fbVerifyToken === DEFAULT_CONFIG.fbVerifyToken || !loadedConfig.fbPageAccessToken || !loadedConfig.walletPhone || !loadedConfig.xnclyClientIdSecret || !loadedConfig.xnclyClientIdSecret.includes(':')) {
+    console.log(`ℹ️ AI Chat Status: ${loadedConfig.aiChatEnabled ? `ENABLED (URL: ${loadedConfig.aiApiUrl})` : 'DISABLED'}`);
+
+    if (loadedConfig.fbVerifyToken === DEFAULT_CONFIG.fbVerifyToken || !loadedConfig.fbPageAccessToken || !loadedConfig.walletPhone || (!loadedConfig.xnclyClientIdSecret && loadedConfig.bankAccountDetails) || (loadedConfig.xnclyClientIdSecret && !loadedConfig.xnclyClientIdSecret.includes(':'))) {
             console.warn("⚠️ WARNING: Essential FB/Payment settings missing or incomplete. Please configure via /admin/settings!");
+    }
+    if (loadedConfig.aiChatEnabled && (!loadedConfig.aiApiKey || !loadedConfig.aiApiUrl)) {
+            console.warn("⚠️ WARNING: AI Chat is enabled but API Key or URL is missing in /admin/settings!");
     }
     console.log(`---------------------------------------------------`);
 }
@@ -3001,22 +3264,22 @@ function createInitialFiles() {
 
     const filesToCreate = {
         'package.json': () => JSON.stringify({
-            "name": "fb-messenger-shop-v5-1-1", // Updated name
-            "version": "5.1.1", // Version match
-            "description": "Facebook Messenger Bot shop with Angpao (Redeem), Xncly Slip (transRef), Code Redemption, Quantity Stock, Manual & Auto Discounts, and full Web Config including Server/SSL.",
+            "name": "fb-messenger-shop-v5-2-0", // Updated version
+            "version": "5.2.0", // Updated version
+            "description": "Facebook Messenger Bot shop with Angpao (Redeem), Xncly Slip (transRef), Code Redemption, Quantity Stock, Manual & Auto Discounts, AI Chat, and full Web Config including Server/SSL.",
             "main": "index.js",
             "scripts": { "start": "node index.js" },
             "dependencies": {
-                "axios": "^1.6.8", // Pinned or latest compatible
+                "axios": "^1.6.8",
                 "body-parser": "^1.20.2",
                 "ejs": "^3.1.9",
-                "express": "^4.18.3", // Updated Express
+                "express": "^4.18.3",
                 "form-data": "^4.0.0",
-                "request": "^2.88.2" // Still used
+                "request": "^2.88.2"
             },
-            "engines": { "node": ">=16.0.0" } // Minimum Node version
+            "engines": { "node": ">=16.0.0" }
         }, null, 2),
-        'README.md': () => `# FB Messenger Shop Bot (v5.1.1 - Angpao Redeem, Slip transRef)\n\nFeatures:\n*   TrueMoney Angpao (**Auto Redeem via API** - requires shop wallet number in config)\n*   Bank Transfer (Xncly Slip Verification + **transRef Duplicate Check**)\n*   Code Redemption (32-char codes)\n*   Manual Discount Codes: Manage %/fixed discounts with limits, expiry, min purchase.\n*   Automatic Promotion: Configure store-wide % discount with min purchase.\n*   Quantity-Based Stock: Unique data per item consumed on purchase.\n*   **Full Web-Based Configuration (/admin/settings):**\n    *   Manage Tokens (FB Verify, Page Access), API Keys (Xncly).\n    *   Wallet/Bank Info.\n    *   Auto Promotion Settings.\n    *   **Server Port & HTTPS/SSL Configuration (Key/Cert Paths).**\n    *   Facebook Connection Status Check.\n*   Admin Dashboard: Manage products, categories, orders, redemption codes, manual discount codes, settings.\n\n## Setup\n\n1.  **Install:** ` + "`npm install`" + `\n2.  **Configure:**\n    *   Run the bot once (` + "`npm start`" + `) to generate initial \`config.json\` and other data files. It will try to detect default SSL certs to guess HTTPS.\n    *   Access the Admin Panel (URL shown in console, e.g., \`http://localhost:3000/admin\` or \`https://YOUR_DOMAIN:8443/admin\`).\n    *   Go to **Settings** (\`/admin/settings\`) and fill in ALL required fields. Pay special attention to:\n        *   Facebook Tokens (Verify & Page Access).\n        *   Payment Details:\n            *   **Wallet Phone:** *Required* for the bot to automatically redeem Angpao links.\n            *   Bank Info.\n            *   Xncly Key.\n        *   **Server & Connection:** Set the desired Port. Enable HTTPS and provide **correct, full paths** to your SSL certificate (\`fullchain.pem\`) and private key (\`privkey.pem\`) files for production.\n    *   Configure Auto Promotion and add Manual Discount Codes (\`/admin/discounts\`) if needed.\n    *   **VERY IMPORTANT:** You **MUST RESTART** the bot (` + "`Ctrl+C`" + ` then ` + "`npm start`" + `) after saving any changes in the "Server & Connection" section (Port, HTTPS toggle, SSL Paths).\n    *   Other settings changes (like FB tokens, payment info) usually take effect immediately or after a short delay (check FB Connection Status).\n3.  **Facebook App:**\n    *   Setup Messenger Platform integration.\n    *   Add Webhook: URL from server startup logs (use HTTPS URL if enabled!), Verify Token from \`/admin/settings\`.\n    *   Subscribe to \`messages\`, \`messaging_postbacks\`.\n    *   Ensure Page Access Token matches.\n4.  **Add Content:** Use the admin panel to add categories, products (with stock items), and redemption codes.\n5.  **Run:** ` + "`npm start`" + `\n\n## Security\n\n**The admin panel (\`/admin\`) has NO built-in password protection.** Secure it yourself (e.g., using basic auth, IP filtering, Cloudflare Access, reverse proxy with auth). Do NOT expose it directly to the internet without protection.`,
+        'README.md': () => `# FB Messenger Shop Bot (v5.2.0 - AI Chat + Angpao Redeem + Slip transRef)\n\nFeatures:\n*   **NEW:** AI Chatbot for handling general user queries (toggleable, requires API key/URL).\n*   TrueMoney Angpao (**Auto Redeem via API** - requires shop wallet number in config)\n*   Bank Transfer (Xncly Slip Verification + **transRef Duplicate Check**)\n*   Code Redemption (32-char codes)\n*   Manual Discount Codes: Manage %/fixed discounts with limits, expiry, min purchase.\n*   Automatic Promotion: Configure store-wide % discount with min purchase.\n*   Quantity-Based Stock: Unique data per item consumed on purchase.\n*   **Full Web-Based Configuration (/admin/settings):**\n    *   Manage Tokens (FB Verify, Page Access), API Keys (Xncly, **AI Chat**).\n    *   Wallet/Bank Info.\n    *   Auto Promotion & **AI Chat** Settings.\n    *   **Server Port & HTTPS/SSL Configuration (Key/Cert Paths).**\n    *   Facebook Connection Status Check.\n*   Admin Dashboard: Manage products, categories, orders, redemption codes, manual discount codes, settings.\n\n## Setup\n\n1.  **Install:** ` + "`npm install`" + `\n2.  **Configure:**\n    *   Run the bot once (` + "`npm start`" + `) to generate initial \`config.json\` and other data files. It will try to detect default SSL certs to guess HTTPS.\n    *   Access the Admin Panel (URL shown in console, e.g., \`http://localhost:3000/admin\` or \`https://YOUR_DOMAIN:8443/admin\`).\n    *   Go to **Settings** (\`/admin/settings\`) and fill in ALL required fields. Pay special attention to:\n        *   Facebook Tokens (Verify & Page Access).\n        *   Payment Details:\n            *   **Wallet Phone:** *Required* for the bot to automatically redeem Angpao links.\n            *   Bank Info & Xncly Key (if using bank transfer).\n        *   **AI Chat:** Enable and provide API Key/URL if you want to use the AI feature.\n        *   **Server & Connection:** Set the desired Port. Enable HTTPS and provide **correct, full paths** to your SSL certificate (\`fullchain.pem\`) and private key (\`privkey.pem\`) files for production.\n    *   Configure Auto Promotion and add Manual Discount Codes (\`/admin/discounts\`) if needed.\n    *   **VERY IMPORTANT:** You **MUST RESTART** the bot (` + "`Ctrl+C`" + ` then ` + "`npm start`" + `) after saving any changes in the "Server & Connection" section (Port, HTTPS toggle, SSL Paths).\n    *   Other settings changes (like FB tokens, payment info, AI settings) usually take effect immediately or after a short delay (check FB Connection Status in settings).\n3.  **Facebook App:**\n    *   Setup Messenger Platform integration.\n    *   Add Webhook: URL from server startup logs (use HTTPS URL if enabled!), Verify Token from \`/admin/settings\`.\n    *   Subscribe to \`messages\`, \`messaging_postbacks\`.\n    *   Ensure Page Access Token matches.\n4.  **Add Content:** Use the admin panel to add categories, products (with stock items), and redemption codes.\n5.  **Run:** ` + "`npm start`" + `\n\n## Security\n\n**The admin panel (\`/admin\`) has NO built-in password protection.** Secure it yourself (e.g., using basic auth, IP filtering, Cloudflare Access, reverse proxy with auth). Do NOT expose it directly to the internet without protection.`,
         '.gitignore': () => `node_modules\n*.log\n*.log.*\n\n# Sensitive Configuration & Data\nconfig.json\nshop_data.json\nverified_slips.json\nredemption_codes.json\ndiscount_codes.json\n\n# SSL Certificates\n*.pem\n\n# Environment Files\n*.env\n\n# OS generated files\n.DS_Store\nThumbs.db\n\n# NPM/Yarn generated logs\nnpm-debug.log*\nyarn-debug.log*\nyarn-error.log*`
     };
 
@@ -3031,14 +3294,16 @@ function createInitialFiles() {
                 console.error(`Error creating initial file ${filename}:`, error);
             }
         } else if (filename === '.gitignore' || filename === 'package.json') {
+             // Check if package.json or gitignore needs updating (simple check)
              try {
-                 const currentContent = fs.readFileSync(filepath, 'utf8');
-                 const newContentStr = contentFn().trim() + '\n';
+                 const currentContent = fs.readFileSync(filepath, 'utf8').trim();
+                 const newContentStr = contentFn().trim();
 
                  if (filename === 'package.json' && currentContent !== newContentStr) {
-                     fs.writeFileSync(filepath, newContentStr, 'utf8');
-                      console.log(`Updated ${filename}. Run 'npm install'.`);
+                     fs.writeFileSync(filepath, newContentStr + '\n', 'utf8');
+                      console.log(`Updated ${filename} content. Run 'npm install'.`);
                  } else if (filename === '.gitignore') {
+                      // Ensure crucial files are ignored
                       let toAppend = '';
                       const filesToIgnore = [
                           'config.json', 'shop_data.json', 'verified_slips.json',
