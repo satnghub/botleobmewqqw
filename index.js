@@ -1,168 +1,132 @@
 
 const express = require('express');
 const bodyParser = require('body-parser');
-const request = require('request'); // Still used for simpler Facebook API calls
+const request = require('request'); // Still used for Facebook API calls
 const fs = require('fs');
 const path = require('path');
 const FormData = require('form-data'); // Needed for slip upload
 const https = require('https');
-const http = require('http'); // Needed for HTTP server option
 const { Writable } = require('stream'); // Needed for downloading image to buffer
-const axios = require('axios'); // For Xncly Slip Check API, FB connection check, Angpao Redeem, and AI Chat
+const axios = require('axios'); // For Xncly Slip Check API
 const crypto = require('crypto'); // For code generation/hashing
 
 // --- File Paths ---
-const DATA_DIR = __dirname; // Store data in the same directory as the script
-const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
-const DATA_FILE = path.join(DATA_DIR, 'shop_data.json');
-const VERIFIED_SLIPS_FILE = path.join(DATA_DIR, 'verified_slips.json');
-const REDEMPTION_CODES_FILE = path.join(DATA_DIR, 'redemption_codes.json');
-const DISCOUNT_CODES_FILE = path.join(DATA_DIR, 'discount_codes.json');
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+const DATA_FILE = path.join(__dirname, 'shop_data.json');
+const VERIFIED_SLIPS_FILE = path.join(__dirname, 'verified_slips.json');
+const REDEMPTION_CODES_FILE = path.join(__dirname, 'redemption_codes.json');
+const viewsDir = path.join(__dirname, 'views');
+const publicDir = path.join(__dirname, 'public');
 
-// --- Default Configuration (used if config.json is missing/invalid) ---
+// --- Default Configuration (Used if config.json is missing/invalid) ---
 const DEFAULT_CONFIG = {
-    // FB Messenger
-    fbVerifyToken: 'replace_this_in_admin_settings', // Replace with a random strong string
-    fbPageAccessToken: '',
-    adminContactLink: 'https://m.me/YOUR_PAGE_ID_HERE', // Replace with your page's message link
-    welcomeGif: 'https://i.pinimg.com/originals/fe/f4/1f/fef41f9945b81122f30e216d02efd0a7.gif',
-    // Wallet (Angpao - Phone used for REDEEMING)
-    walletPhone: '', // **Required** for the bot to REDEEM angpao links
+    walletPhone: '0825658423', // <<<<< ใส่เบอร์วอลเล็ท TrueMoney ของคุณ (สำหรับรับเงิน ไม่แสดงให้ผู้ใช้เห็น)
     walletImage: 'https://res09.bignox.com/appcenter/th/2020/05/TrueMoney.jpg',
-    // Bank Transfer
-    bankAccountDetails: "ธนาคาร: กรอกใน Admin\nเลขบัญชี: กรอกใน Admin\nชื่อบัญชี: กรอกใน Admin",
-    bankImage: 'https://i.pinimg.com/474x/c8/7a/a5/c87aa5a2adc0ac60659100f3e880aa41.jpg',
-    // Xncly API
-    xnclyClientIdSecret: '', // Format: CLIENTID:SECRET
+    welcomeGif: 'https://i.pinimg.com/originals/fe/f4/1f/fef41f9945b81122f30e216d02efd0a7.gif',
+    bankAccountDetails: "ธนาคาร: กสิกรไทย\nเลขบัญชี: 206-3-13088-8\nชื่อบัญชี: พันวิลา บุยาหลง", // <<<<< ใส่ข้อมูลบัญชีธนาคารของคุณ
+    bankImage: 'https://i.pinimg.com/474x/c8/7a/a5/c87aa5a2adc0ac60659100f3e880aa41.jpg', // <<<<< รูปภาพโลโก้ธนาคาร
+    codeRedemptionImage: 'https://cdn-icons-png.flaticon.com/512/1087/1087815.png', // <<<<< รูปภาพสำหรับตัวเลือกใช้โค้ด
+    xnclyClientIdSecret: '68ac5d834ae6dadfb9:59c3fe615570b9a0f643c112a302e45090a4a7470c725326', // <<<<< ใส่ ClientID:Secret ของคุณที่นี่!
     xnclyCheckUrl: 'https://ccd.xncly.xyz/api/check-slip',
-    // Codes & Discounts Images
-    codeRedemptionImage: 'https://cdn-icons-png.flaticon.com/512/1087/1087815.png',
-    discountImage: 'https://cdn-icons-png.flaticon.com/512/2438/2438112.png',
-    // Auto Promotion
-    autoPromotionEnabled: false,
-    autoPromotionPercentage: 10, // Default 10%
-    autoPromotionMinPurchase: 500, // Default 500 THB minimum
-    // Server & Connection Settings
-    serverPort: 3000, // Default port (will use 8443 if HTTPS detected initially)
-    enableHttps: false,
-    sslKeyPath: '/etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem', // Default placeholder path
-    sslCertPath: '/etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem', // Default placeholder path
-    // --- NEW: AI Chat Settings ---
-    aiChatEnabled: false,
-    aiApiKey: '', // Default API Key REMOVED - must be set in admin settings if enabled
-    aiApiUrl: 'https://bots.easy-peasy.ai/bot/9bc091b4-8477-4844-8b53-a354244f53e8/api' // Default API URL
+    verifyToken: 'mysecretoken', // <<<<< ใส่ Verify Token ของคุณที่ตั้งใน Facebook App
+    pageAccessToken: 'EAA69YPCejwEBO8znB2xyhE461yM3ZCvF6dqvOKmt19c4etKQK984sQmchA0yOOdc3KwDx9ClLTfgPOztIEjYnR6tRvxeSEMZA1fbee2mdZCyIrFu4W2ZAO2twrkeQSII97yRq6nDaFv31ah85FR7WRKSrcstMt6iDxQdZB8PSrU271vMRgAUvb1f5wkVpKorjYwZDZD' // <<<<< ใส่ Page Access Token ของคุณ
 };
 
-// --- Global Variables ---
-let loadedConfig = { ...DEFAULT_CONFIG }; // Start with defaults
-let shopData = {};
-let verifiedSlips = []; // Stores verified 'transRef' IDs
-let validRedemptionCodes = [];
-let discountCodes = [];
-let serverInstance = null; // To hold the HTTP/HTTPS server instance
+// --- Runtime Configuration Variable ---
+let runtimeConfig = { ...DEFAULT_CONFIG }; // Start with defaults
 
-// --- Configuration Loading/Saving ---
+// --- SSL Configuration (Remains file-based) ---
+const privateKeyPath = '/etc/letsencrypt/live/scriptbotonline.vipv2boxth.xyz/privkey.pem';
+const certificatePath = '/etc/letsencrypt/live/scriptbotonline.vipv2boxth.xyz/fullchain.pem';
+let credentials = {};
+let useHttps = false;
+
+// --- Load and Save Configuration ---
 function loadConfig() {
     try {
         if (fs.existsSync(CONFIG_FILE)) {
-            const fileContent = fs.readFileSync(CONFIG_FILE, 'utf8');
-            const parsedConfig = JSON.parse(fileContent);
-            // Merge ensuring new default keys are added if missing in saved config
-            loadedConfig = { ...DEFAULT_CONFIG, ...parsedConfig };
-            console.log("Configuration loaded successfully from config.json.");
+            const rawData = fs.readFileSync(CONFIG_FILE, 'utf8');
+            const loadedConfig = JSON.parse(rawData);
+            // Merge loaded config with defaults to ensure all keys exist
+            runtimeConfig = { ...DEFAULT_CONFIG, ...loadedConfig };
+            console.log("Configuration loaded successfully from config.json");
         } else {
-            console.warn("config.json not found. Using default values. Please configure settings via /admin/settings.");
-            // Detect if default certs likely exist to guess initial HTTPS state
-            try {
-                fs.accessSync(DEFAULT_CONFIG.sslKeyPath, fs.constants.R_OK);
-                fs.accessSync(DEFAULT_CONFIG.sslCertPath, fs.constants.R_OK);
-                console.log("Default SSL certificate paths seem accessible, enabling HTTPS by default.");
-                loadedConfig.enableHttps = true;
-                loadedConfig.serverPort = 8443; // Default HTTPS port
-            } catch (err) {
-                console.log("Default SSL certificates not found or accessible, using HTTP by default.");
-                loadedConfig.enableHttps = false;
-                loadedConfig.serverPort = 3000; // Default HTTP port
-            }
-            saveConfig(); // Create the file with determined default values
+            console.warn("config.json not found. Using default configuration. Saving defaults.");
+            saveConfig(); // Save the defaults if file doesn't exist
         }
-        // Ensure correct types after loading
-        loadedConfig.autoPromotionEnabled = loadedConfig.autoPromotionEnabled === true;
-        loadedConfig.autoPromotionPercentage = parseFloat(loadedConfig.autoPromotionPercentage) || 0;
-        loadedConfig.autoPromotionMinPurchase = parseFloat(loadedConfig.autoPromotionMinPurchase) || 0;
-        loadedConfig.serverPort = parseInt(loadedConfig.serverPort, 10) || DEFAULT_CONFIG.serverPort;
-        loadedConfig.enableHttps = loadedConfig.enableHttps === true;
-        loadedConfig.sslKeyPath = loadedConfig.sslKeyPath || DEFAULT_CONFIG.sslKeyPath;
-        loadedConfig.sslCertPath = loadedConfig.sslCertPath || DEFAULT_CONFIG.sslCertPath;
-        loadedConfig.walletPhone = String(loadedConfig.walletPhone || '').trim(); // Ensure wallet phone is string
-        // AI Settings Type Enforcement
-        loadedConfig.aiChatEnabled = loadedConfig.aiChatEnabled === true;
-        loadedConfig.aiApiKey = String(loadedConfig.aiApiKey || '').trim();
-        loadedConfig.aiApiUrl = String(loadedConfig.aiApiUrl || '').trim();
-
     } catch (error) {
-        console.error(`Error loading config.json: ${error.message}. Using default values.`);
-        loadedConfig = { ...DEFAULT_CONFIG }; // Reset to defaults on error
+        console.error(`Error loading or parsing config.json: ${error.message}. Using default configuration.`);
+        runtimeConfig = { ...DEFAULT_CONFIG }; // Fallback to defaults on error
     }
 }
 
 function saveConfig() {
     try {
-        // Ensure boolean/numbers/strings are saved correctly
-        loadedConfig.autoPromotionEnabled = loadedConfig.autoPromotionEnabled === true;
-        loadedConfig.autoPromotionPercentage = parseFloat(loadedConfig.autoPromotionPercentage) || 0;
-        loadedConfig.autoPromotionMinPurchase = parseFloat(loadedConfig.autoPromotionMinPurchase) || 0;
-        loadedConfig.serverPort = parseInt(loadedConfig.serverPort, 10) || DEFAULT_CONFIG.serverPort;
-        loadedConfig.enableHttps = loadedConfig.enableHttps === true;
-        loadedConfig.walletPhone = String(loadedConfig.walletPhone || '').trim();
-        // AI Settings Type Enforcement
-        loadedConfig.aiChatEnabled = loadedConfig.aiChatEnabled === true;
-        loadedConfig.aiApiKey = String(loadedConfig.aiApiKey || '').trim();
-        loadedConfig.aiApiUrl = String(loadedConfig.aiApiUrl || '').trim();
-
-        fs.writeFileSync(CONFIG_FILE, JSON.stringify(loadedConfig, null, 2), 'utf8');
-        console.log("Configuration saved to config.json.");
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(runtimeConfig, null, 2), 'utf8');
+        console.log("Configuration saved successfully to config.json");
+        return true;
     } catch (error) {
         console.error("Error saving configuration to config.json:", error);
+        return false;
     }
 }
 
-// --- Initial Load ---
-loadConfig(); // Load configuration first
+// --- Load Configuration on Startup ---
+loadConfig();
+
+// --- Load SSL Certificates ---
+try {
+    const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
+    const certificate = fs.readFileSync(certificatePath, 'utf8');
+    credentials = { key: privateKey, cert: certificate };
+    useHttps = true;
+    console.log("SSL certificates loaded successfully. Running HTTPS server.");
+} catch (error) {
+    console.warn("Warning: Could not load SSL certificates. Running HTTP server instead.", error.message);
+    console.warn(`Make sure '${privateKeyPath}' and '${certificatePath}' exist and are readable.`);
+    console.warn("SSL Paths must still be configured directly in the script.");
+}
+
+// --- Data Storage Variables ---
+let shopData = {};
+let verifiedSlips = [];
+let validRedemptionCodes = [];
 
 // --- Load or initialize shop data ---
 try {
     if (fs.existsSync(DATA_FILE)) {
         shopData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        // Data structure validation (important!)
         if (!shopData) shopData = {};
         if (!Array.isArray(shopData.categories)) shopData.categories = [];
         shopData.categories = shopData.categories.map(category =>
             typeof category === 'string' ? { name: category, imageUrl: '', description: '' } : { name: category.name || 'Unnamed', imageUrl: category.imageUrl || '', description: category.description || '' }
         );
         if (!Array.isArray(shopData.products)) shopData.products = [];
-        shopData.products = shopData.products.map(p => ({
-            ...p,
-            stockItems: Array.isArray(p.stockItems) ? p.stockItems : [], // Ensure stockItems is array
-            stock: Array.isArray(p.stockItems) ? p.stockItems.length : 0,
-            createdAt: p.createdAt || new Date(0).toISOString(), // Ensure createdAt exists
-            updatedAt: p.updatedAt || new Date(0).toISOString() // Ensure updatedAt exists
-        }));
+        shopData.products = shopData.products.map(product => {
+            if (product.downloadUrl && !product.downloadUrls) {
+                console.warn(`Converting old 'downloadUrl' string to 'downloadUrls' array for product ID ${product.id}`);
+                product.downloadUrls = product.downloadUrl.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+                delete product.downloadUrl;
+            } else if (!Array.isArray(product.downloadUrls)) {
+                 console.warn(`Product ID ${product.id} is missing or has invalid 'downloadUrls'. Initializing as empty array.`);
+                 product.downloadUrls = [];
+            }
+            if (product.hasOwnProperty('stock')) {
+                 console.warn(`Removing legacy 'stock' property from product ID ${product.id}`);
+                 delete product.stock;
+            }
+            return product;
+        });
         if (typeof shopData.users !== 'object' || shopData.users === null) shopData.users = {};
         if (!Array.isArray(shopData.orders)) shopData.orders = [];
-         // Add createdAt/updatedAt if missing in orders
-         shopData.orders = shopData.orders.map(o => ({
-            ...o,
-            createdAt: o.createdAt || new Date(0).toISOString(),
-            updatedAt: o.updatedAt || new Date(0).toISOString(),
-         }));
-
     } else {
         throw new Error("Shop data file not found, creating new one.");
     }
 } catch (error) {
-    console.warn(`Warning: ${error.message}. Initializing shop data.`);
+    console.warn(`Warning: ${error.message}. Initializing shop data with default structure.`);
     shopData = { products: [], categories: [], users: {}, orders: [] };
-    saveShopData();
+    saveShopData(); // Create the file with default structure
 }
 
 // --- Load or initialize verified slips data ---
@@ -170,16 +134,18 @@ try {
     if (fs.existsSync(VERIFIED_SLIPS_FILE)) {
         verifiedSlips = JSON.parse(fs.readFileSync(VERIFIED_SLIPS_FILE, 'utf8'));
         if (!Array.isArray(verifiedSlips)) {
+            console.warn("Verified slips file is not an array, resetting.");
             verifiedSlips = [];
             saveVerifiedSlips();
         }
-        console.log(`Loaded ${verifiedSlips.length} verified slip references (transRef).`);
+        console.log(`Loaded ${verifiedSlips.length} verified slip references.`);
     } else {
+        console.log("Verified slips file not found, creating new one.");
         verifiedSlips = [];
         saveVerifiedSlips();
     }
 } catch (error) {
-    console.error(`Error loading verified slips: ${error.message}. Initializing empty list.`);
+    console.error(`Error loading verified slips file: ${error.message}. Initializing empty list.`);
     verifiedSlips = [];
     saveVerifiedSlips();
 }
@@ -189,87 +155,56 @@ try {
     if (fs.existsSync(REDEMPTION_CODES_FILE)) {
         validRedemptionCodes = JSON.parse(fs.readFileSync(REDEMPTION_CODES_FILE, 'utf8'));
         if (!Array.isArray(validRedemptionCodes)) {
+            console.warn("Redemption codes file is not an array, resetting.");
             validRedemptionCodes = [];
             saveValidRedemptionCodes();
         }
         console.log(`Loaded ${validRedemptionCodes.length} valid redemption codes.`);
     } else {
+        console.log("Redemption codes file not found, creating new one.");
         validRedemptionCodes = [];
         saveValidRedemptionCodes();
     }
 } catch (error) {
-    console.error(`Error loading redemption codes: ${error.message}. Initializing empty list.`);
+    console.error(`Error loading redemption codes file: ${error.message}. Initializing empty list.`);
     validRedemptionCodes = [];
     saveValidRedemptionCodes();
 }
 
-// --- Load or initialize discount codes data ---
-function loadDiscountCodes() {
-    try {
-        if (fs.existsSync(DISCOUNT_CODES_FILE)) {
-            discountCodes = JSON.parse(fs.readFileSync(DISCOUNT_CODES_FILE, 'utf8'));
-            if (!Array.isArray(discountCodes)) {
-                discountCodes = [];
-                saveDiscountCodes();
-            }
-            // Ensure essential fields exist (add defaults if needed)
-            discountCodes = discountCodes.map(code => ({
-                ...code,
-                id: code.id || `DC-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-                code: code.code || '',
-                type: code.type || 'percentage', // Default to percentage
-                value: code.value || 0,
-                maxUses: code.maxUses === null || code.maxUses === Infinity ? null : (parseInt(code.maxUses, 10) || null), // Allow null/Infinity
-                uses: parseInt(code.uses, 10) || 0,
-                minPurchase: parseFloat(code.minPurchase) || 0,
-                expiresAt: code.expiresAt || null, // Should be ISO string or null
-                createdAt: code.createdAt || new Date().toISOString()
-            }));
-            console.log(`Loaded ${discountCodes.length} discount codes.`);
-        } else {
-            discountCodes = [];
-            saveDiscountCodes();
-            console.log("Created empty discount_codes.json file.");
-        }
-    } catch (error) {
-        console.error(`Error loading discount codes: ${error.message}. Initializing empty list.`);
-        discountCodes = [];
-        saveDiscountCodes();
-    }
-}
-loadDiscountCodes(); // Load discounts on startup
 
 // --- Save Data Functions ---
 function saveShopData() {
     try {
-        // Update stock count just before saving for ALL products
-        shopData.products.forEach(p => {
-            p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0;
-        });
+        // Ensure downloadUrls exists before saving
+        if(shopData && shopData.products) {
+            shopData.products.forEach(p => {
+                if (!Array.isArray(p.downloadUrls)) {
+                    console.warn(`Product ${p.id} missing downloadUrls array before save, initializing.`);
+                    p.downloadUrls = [];
+                }
+                if (p.hasOwnProperty('stock')) delete p.stock;
+                if (p.hasOwnProperty('downloadUrl') && Array.isArray(p.downloadUrls)) delete p.downloadUrl;
+            });
+        }
         fs.writeFileSync(DATA_FILE, JSON.stringify(shopData, null, 2), 'utf8');
     } catch (error) {
-        console.error("Error saving shop data:", error);
+        console.error("Error saving shop data to JSON file:", error);
     }
 }
+
 function saveVerifiedSlips() {
     try {
         fs.writeFileSync(VERIFIED_SLIPS_FILE, JSON.stringify(verifiedSlips, null, 2), 'utf8');
     } catch (error) {
-        console.error("Error saving verified slips:", error);
+        console.error("Error saving verified slips to JSON file:", error);
     }
 }
+
 function saveValidRedemptionCodes() {
     try {
         fs.writeFileSync(REDEMPTION_CODES_FILE, JSON.stringify(validRedemptionCodes, null, 2), 'utf8');
     } catch (error) {
-        console.error("Error saving redemption codes:", error);
-    }
-}
-function saveDiscountCodes() {
-    try {
-        fs.writeFileSync(DISCOUNT_CODES_FILE, JSON.stringify(discountCodes, null, 2), 'utf8');
-    } catch (error) {
-        console.error("Error saving discount codes:", error);
+        console.error("Error saving redemption codes to JSON file:", error);
     }
 }
 
@@ -277,18 +212,35 @@ function saveDiscountCodes() {
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(publicDir)); // Serve static files
 app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
+app.set('views', viewsDir); // Set views directory
 
-// --- Facebook Messenger API Functions ---
+// --- Helper Functions ---
+function validateImageUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    // Allow data URLs for flexibility, though external URLs are generally better
+    if (url.trim().startsWith('data:image/')) return true;
+    return /^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i.test(url.trim());
+}
+
+function isValidUrl(string) {
+  try {
+    new URL(string);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+
+// --- Facebook Messenger API Functions (Using runtimeConfig) ---
 async function sendApiRequest(options) {
-    if (!options.qs || !options.qs.access_token) {
-        options.qs = { ...options.qs, access_token: loadedConfig.fbPageAccessToken };
-    }
-    if (!loadedConfig.fbPageAccessToken) {
-        console.error("API Request Error: Facebook Page Access Token is not configured in /admin/settings.");
-        return Promise.reject(new Error("Missing Page Access Token"));
+    // Add Page Access Token dynamically
+    if (options.qs) {
+        options.qs.access_token = runtimeConfig.pageAccessToken;
+    } else {
+        options.qs = { access_token: runtimeConfig.pageAccessToken };
     }
 
     return new Promise((resolve, reject) => {
@@ -297,16 +249,15 @@ async function sendApiRequest(options) {
                 console.error(`API Request Error (${options.url}):`, error);
                 reject(error);
             } else if (body && body.error) {
-                if (body.error.code === 100 && (body.error.error_subcode === 2018278 || body.error.error_subcode === 2018001 || body.error.error_subcode === 2018108)) {
-                    console.log(`User ${options.json?.recipient?.id || '?'} may have blocked the page or messaging is restricted. Error: ${body.error.message}`);
-                    resolve({ error: 'USER_BLOCKED_OR_RESTRICTED', details: body.error });
-                } else {
-                    console.error(`API Request Facebook Error (${options.url}):`, JSON.stringify(body.error));
-                    if (body.error.type === 'OAuthException') {
-                        console.error("----> Suggestion: Check if the Page Access Token in /admin/settings is correct and valid. <----");
-                    }
-                    reject(body.error);
-                }
+                 if (body.error.code === 100 && (body.error.error_subcode === 2018278 || body.error.error_subcode === 2018001 || body.error.error_subcode === 2018108)) {
+                     console.log(`User ${options.json?.recipient?.id || '?'} may have blocked the page or messaging is restricted. Error: ${body.error.message}`);
+                     resolve({ error: 'USER_BLOCKED_OR_RESTRICTED', details: body.error });
+                 } else {
+                     console.error(`API Request Facebook Error (${options.url}):`, JSON.stringify(body.error));
+                     console.error(`Recipient: ${options.json?.recipient?.id}, Message Type: ${options.json?.message?.attachment?.type || 'text'}`);
+                     if(body.error.code === 190) console.error("--> ACCESS TOKEN MIGHT BE INVALID OR EXPIRED! Check '/admin/settings'. <--");
+                     reject(body.error);
+                 }
             } else if (response.statusCode >= 400) {
                 console.error(`API Request HTTP Error (${options.url}): Status ${response.statusCode}`, body);
                 reject(new Error(`HTTP Error ${response.statusCode}`));
@@ -316,9 +267,11 @@ async function sendApiRequest(options) {
         });
     });
 }
+
 async function sendTypingIndicator(sender, action = 'typing_on') {
     const options = {
         url: 'https://graph.facebook.com/v19.0/me/messages',
+        // qs access_token added by sendApiRequest
         method: 'POST',
         json: {
             recipient: { id: sender },
@@ -328,204 +281,130 @@ async function sendTypingIndicator(sender, action = 'typing_on') {
     try {
         await sendApiRequest(options);
     } catch (error) {
-        if (error?.error !== 'USER_BLOCKED_OR_RESTRICTED') {
-           console.warn(`Could not send typing indicator to ${sender}: ${error.message || JSON.stringify(error)}`);
-        }
+        // console.warn(`Could not send typing indicator (${action}) to ${sender}:`, error.message || error);
     }
 }
+
 async function sendMessage(sender, text) {
     if (!sender || !text) return;
+    if (!runtimeConfig.pageAccessToken) { console.error("sendMessage Error: Page Access Token is missing in config!"); return; }
     try {
         await sendTypingIndicator(sender, 'typing_on');
         const options = {
             url: 'https://graph.facebook.com/v19.0/me/messages',
+            // qs access_token added by sendApiRequest
             method: 'POST',
             json: { recipient: { id: sender }, message: { text: text } }
         };
         await sendApiRequest(options);
-    } catch (error) {
-        if (error?.error !== 'USER_BLOCKED_OR_RESTRICTED') {
-            console.error(`Error sending text message to ${sender}:`, error.message || JSON.stringify(error));
-        }
-    } finally {
-        await sendTypingIndicator(sender, 'typing_off');
-    }
+    } catch (error) { console.error(`Error sending text message to ${sender}:`, error.message || error); }
+    finally { await sendTypingIndicator(sender, 'typing_off'); }
 }
+
 async function sendImageMessage(sender, imageUrl) {
     if (!sender || !imageUrl) return;
+     if (!runtimeConfig.pageAccessToken) { console.error("sendImageMessage Error: Page Access Token is missing in config!"); return; }
+     if (!validateImageUrl(imageUrl)) {
+         console.warn(`Attempted to send invalid image URL: ${imageUrl}`);
+         // Optionally send a placeholder or error message
+         // await sendMessage(sender, "ขออภัย ไม่สามารถแสดงรูปภาพได้ในขณะนี้");
+         return;
+     }
     try {
         await sendTypingIndicator(sender, 'typing_on');
         const options = {
             url: 'https://graph.facebook.com/v19.0/me/messages',
+             // qs access_token added by sendApiRequest
             method: 'POST',
-            json: {
-                recipient: { id: sender },
-                message: { attachment: { type: "image", payload: { url: imageUrl, is_reusable: true } } }
-            }
+            json: { recipient: { id: sender }, message: { attachment: { type: "image", payload: { url: imageUrl, is_reusable: true } } } }
         };
         await sendApiRequest(options);
-    } catch (error) {
-        if (error?.error !== 'USER_BLOCKED_OR_RESTRICTED') {
-            console.error(`Error sending image message to ${sender}:`, error.message || JSON.stringify(error));
-        }
-    } finally {
-        await sendTypingIndicator(sender, 'typing_off');
-    }
+    } catch (error) { console.error(`Error sending image message to ${sender} (URL: ${imageUrl}):`, error.message || error); }
+    finally { await sendTypingIndicator(sender, 'typing_off'); }
 }
+
 async function sendGenericTemplate(sender, elements) {
     if (!sender || !elements || !Array.isArray(elements) || elements.length === 0) return;
+     if (!runtimeConfig.pageAccessToken) { console.error("sendGenericTemplate Error: Page Access Token is missing in config!"); return; }
     try {
         await sendTypingIndicator(sender, 'typing_on');
         const options = {
             url: 'https://graph.facebook.com/v19.0/me/messages',
+             // qs access_token added by sendApiRequest
             method: 'POST',
-            json: {
-                recipient: { id: sender },
-                message: { attachment: { type: "template", payload: { template_type: "generic", elements: elements.slice(0, 10) } } }
-            }
+            json: { recipient: { id: sender }, message: { attachment: { type: "template", payload: { template_type: "generic", elements: elements.slice(0, 10) } } } }
         };
         await sendApiRequest(options);
-    } catch (error) {
-        if (error?.error !== 'USER_BLOCKED_OR_RESTRICTED') {
-            console.error(`Error sending generic template to ${sender}:`, error.message || JSON.stringify(error));
-        }
-    } finally {
-        await sendTypingIndicator(sender, 'typing_off');
-    }
+    } catch (error) { console.error(`Error sending generic template to ${sender}:`, error.message || error); }
+    finally { await sendTypingIndicator(sender, 'typing_off'); }
 }
+
 async function sendButtonTemplate(sender, text, buttons) {
     if (!sender || !text || !buttons || !Array.isArray(buttons) || buttons.length === 0) return;
+     if (!runtimeConfig.pageAccessToken) { console.error("sendButtonTemplate Error: Page Access Token is missing in config!"); return; }
     try {
         await sendTypingIndicator(sender, 'typing_on');
         const options = {
             url: 'https://graph.facebook.com/v19.0/me/messages',
+            // qs access_token added by sendApiRequest
             method: 'POST',
-            json: {
-                recipient: { id: sender },
-                message: { attachment: { type: "template", payload: { template_type: "button", text: text, buttons: buttons.slice(0, 3) } } }
-            }
+            json: { recipient: { id: sender }, message: { attachment: { type: "template", payload: { template_type: "button", text: text, buttons: buttons.slice(0, 3) } } } }
         };
         await sendApiRequest(options);
-    } catch (error) {
-        if (error?.error !== 'USER_BLOCKED_OR_RESTRICTED') {
-            console.error(`Error sending button template to ${sender}:`, error.message || JSON.stringify(error));
-        }
-    } finally {
-        await sendTypingIndicator(sender, 'typing_off');
-    }
+    } catch (error) { console.error(`Error sending button template to ${sender}:`, error.message || error); }
+    finally { await sendTypingIndicator(sender, 'typing_off'); }
 }
+
 async function sendQuickReplies(sender, text, quickReplies) {
     if (!sender || !text || !quickReplies || !Array.isArray(quickReplies) || quickReplies.length === 0) return;
+     if (!runtimeConfig.pageAccessToken) { console.error("sendQuickReplies Error: Page Access Token is missing in config!"); return; }
     try {
         await sendTypingIndicator(sender, 'typing_on');
         const options = {
             url: 'https://graph.facebook.com/v19.0/me/messages',
+             // qs access_token added by sendApiRequest
             method: 'POST',
-            json: {
-                recipient: { id: sender },
-                message: { text: text, quick_replies: quickReplies.slice(0, 13) }
-            }
+            json: { recipient: { id: sender }, message: { text: text, quick_replies: quickReplies.slice(0, 13) } }
         };
         await sendApiRequest(options);
-    } catch (error) {
-        if (error?.error !== 'USER_BLOCKED_OR_RESTRICTED') {
-            console.error(`Error sending quick replies to ${sender}:`, error.message || JSON.stringify(error));
-        }
-    } finally {
-        await sendTypingIndicator(sender, 'typing_off');
-    }
+    } catch (error) { console.error(`Error sending quick replies to ${sender}:`, error.message || error); }
+    finally { await sendTypingIndicator(sender, 'typing_off'); }
 }
-// --- End Facebook API Functions ---
 
-// --- AI Chat API Function ---
-async function getAIResponse(messageText) {
-    if (!loadedConfig.aiChatEnabled) {
-        console.log("AI Chat is disabled in settings.");
-        return null;
-    }
-    if (!loadedConfig.aiApiKey || !loadedConfig.aiApiUrl) {
-        console.error("AI Chat Error: API Key or URL is missing in settings.");
-        return null; // Or a generic error message?
-    }
-
-    console.log(`Sending message to AI: "${messageText.substring(0, 50)}..."`);
-    try {
-        const response = await axios.post(loadedConfig.aiApiUrl, {
-            "message": messageText,
-            "history": [], // Keep history simple for now
-            "stream": false,
-            "include_sources": false
-        }, {
-            headers: {
-                'Content-Type': 'application/json',
-                'X-API-Key': loadedConfig.aiApiKey // Use the key from config
-            },
-            timeout: 20000 // 20 second timeout
-        });
-
-        // Need to check the *actual* structure of the successful response from Easy-Peasy AI
-        // Assuming the response text is in `response.data.response` based on common patterns
-        const aiReply = response.data?.response || response.data?.text || response.data?.result; // Try common fields
-
-        if (response.status === 200 && typeof aiReply === 'string' && aiReply.trim()) {
-            console.log(`AI response received: "${aiReply.substring(0, 100)}..."`);
-            return aiReply.trim();
-        } else {
-            console.error("AI Chat Error: Received unexpected response structure or empty reply.", response.status, response.data);
-            return null; // Or a specific error message
-        }
-    } catch (error) {
-        console.error('AI Chat API Error:', error.message);
-        if (axios.isAxiosError(error)) {
-            if (error.response) {
-                console.error('AI API Error Response Status:', error.response.status);
-                console.error('AI API Error Response Data:', error.response.data);
-            } else if (error.request) {
-                console.error('AI API Error: No response received from server.');
-            }
-            if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-                console.error('AI API Error: Request timed out.');
-            }
-        }
-        return null; // Indicate failure
-    }
-}
-// --- End AI Chat Function ---
-
-// --- Shop Logic Functions ---
+// --- Shop Logic Functions (Using runtimeConfig) ---
 function getUserData(sender) {
     if (!shopData.users[sender]) {
         shopData.users[sender] = { cart: [], lastCategory: null, lastViewedProducts: [], currentPage: 0, checkoutState: null };
-        saveShopData();
+        saveShopData(); // Save immediately when a new user is created
     }
-    if (shopData.users[sender].checkoutState === undefined) {
-        shopData.users[sender].checkoutState = null;
-    }
-     if (!Array.isArray(shopData.users[sender].cart)) {
-         shopData.users[sender].cart = [];
-     }
+    if (!shopData.users[sender].cart) shopData.users[sender].cart = [];
+    if (!shopData.users[sender].checkoutState) shopData.users[sender].checkoutState = null;
     return shopData.users[sender];
 }
+
 async function showCategories(sender) {
     try {
-        if (shopData.categories.length === 0) {
-            await sendMessage(sender, "ขออภัย ขณะนี้ยังไม่มีหมวดหมู่สินค้า (กรุณาเพิ่มใน /admin/categories)");
+        const categories = shopData.categories;
+        if (categories.length === 0) {
+            await sendMessage(sender, "ขออภัย ขณะนี้ยังไม่มีหมวดหมู่สินค้า");
             return;
         }
-        await sendImageMessage(sender, loadedConfig.welcomeGif);
-        await sendMessage(sender, "สวัสดีครับ! ยินดีต้อนรับสู่ร้าน\nเลือกหมวดหมู่ที่คุณสนใจได้เลยครับ 👇");
-
-        const elements = shopData.categories.map(category => ({
+        if (runtimeConfig.welcomeGif) {
+            await sendImageMessage(sender, runtimeConfig.welcomeGif);
+        } else {
+            console.warn("Welcome GIF URL is not set in config.");
+        }
+        await sendMessage(sender, "สวัสดีครับ! ยินดีต้อนรับสู่ร้านขายโค้ดและโปรแกรม\nเลือกหมวดหมู่ที่คุณสนใจได้เลยครับ 👇");
+        const elements = categories.map(category => ({
             title: category.name,
-            subtitle: category.description || "เลือกดูสินค้า",
-            image_url: category.imageUrl || "https://via.placeholder.com/300x200/EEE/777?text=Category", // Placeholder with text
+            subtitle: category.description || "เลือกดูสินค้าในหมวดหมู่นี้",
+            image_url: category.imageUrl || "https://via.placeholder.com/300x200?text=Category",
             buttons: [{ type: "postback", title: `ดูสินค้า ${category.name}`, payload: `CATEGORY_${category.name}` }]
         }));
         await sendGenericTemplate(sender, elements);
-
         await sendButtonTemplate(sender, "หรือเลือกดำเนินการอื่นๆ:", [
             { type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" },
-            { type: "web_url", title: "💬 ติดต่อแอดมิน", url: loadedConfig.adminContactLink || '#' },
+            { type: "web_url", title: "💬 ติดต่อแอดมิน", url: "https://m.me/61555184860915" }, // Consider making this configurable too?
             { type: "postback", title: "💡 ช่วยเหลือ", payload: "HELP" }
         ]);
     } catch (error) {
@@ -533,62 +412,67 @@ async function showCategories(sender) {
         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงหมวดหมู่");
     }
 }
+
+// --- showProductsByCategory, showProductDetail, addToCart, viewCart, removeFromCartInstance, clearCart ---
+// --- (No direct config dependencies changed, they use data from shopData) ---
+// --- (Copying them here for completeness, unchanged from previous logic) ---
 async function showProductsByCategory(sender, categoryName, page = 0) {
     try {
-        const pageSize = 5; // Products per page
+        const pageSize = 5;
         const skip = page * pageSize;
+
         const productsInCategory = shopData.products.filter(p => p.category === categoryName);
-
-        // Ensure stock count is accurate before slicing/displaying
-        productsInCategory.forEach(p => {
-            p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0;
-        });
-
+        // Sort by creation date (newest first), then slice for pagination
         const productsToShow = productsInCategory
-            .filter(p => p.stock > 0) // Filter out-of-stock
-            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)) // Newest first
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
             .slice(skip, skip + pageSize);
-
-        const totalAvailableProducts = productsInCategory.filter(p => p.stock > 0).length; // Count only available
+        const totalProducts = productsInCategory.length;
 
         if (productsToShow.length === 0) {
-            await sendMessage(sender, page === 0 ? `ขออภัย ไม่พบสินค้าพร้อมส่งในหมวดหมู่ "${categoryName}"` : "ไม่มีสินค้าเพิ่มเติมในหมวดหมู่นี้แล้ว");
+            await sendMessage(sender, page === 0 ? `ขออภัย ไม่พบสินค้าในหมวดหมู่ "${categoryName}"` : "ไม่มีสินค้าเพิ่มเติมในหมวดหมู่นี้แล้ว");
             await sendButtonTemplate(sender, "กลับไปเลือกหมวดหมู่อื่นๆ", [{ type: "postback", title: "เลือกหมวดหมู่", payload: "SHOW_CATEGORIES" }]);
             return;
         }
 
         const user = getUserData(sender);
         user.lastCategory = categoryName;
-        user.lastViewedProducts = productsToShow.map(p => p.id); // Store IDs of viewed products on this page
+        user.lastViewedProducts = productsToShow.map(p => p.id);
         user.currentPage = page;
         saveShopData();
 
         await sendMessage(sender, `🔎 สินค้าในหมวดหมู่ "${categoryName}" (หน้า ${page + 1}):`);
 
-        const elements = productsToShow.map(product => ({
-            title: product.name,
-            subtitle: `฿${product.price.toFixed(2)} | ${product.language || 'N/A'} | เหลือ ${product.stock} ชิ้น`,
-            image_url: product.imageUrl || "https://via.placeholder.com/300x200/EEE/777?text=Product", // Placeholder
-            buttons: [
-                { type: "postback", title: "ดูรายละเอียด", payload: `PRODUCT_VIEW_${product.id}` },
-                { type: "postback", title: "➕ หยิบใส่ตะกร้า", payload: `PRODUCT_ADD_TO_CART_${product.id}` }
-            ]
-        }));
+        const elements = productsToShow.map(product => {
+             const stockCount = product.downloadUrls?.length || 0;
+            return {
+                title: product.name + (stockCount <= 0 ? ' (หมด)' : ''),
+                subtitle: `฿${product.price} | ${product.language || 'N/A'} | เหลือ ${stockCount} ชิ้น`,
+                image_url: product.imageUrl || "https://via.placeholder.com/300x200?text=Product",
+                buttons: [
+                    { type: "postback", title: "ดูรายละเอียด", payload: `PRODUCT_VIEW_${product.id}` },
+                    ...(stockCount > 0 ? [{ type: "postback", title: "➕ หยิบใส่ตะกร้า (1 ชิ้น)", payload: `PRODUCT_ADD_TO_CART_${product.id}` }] : [])
+                ]
+            };
+        });
+
         await sendGenericTemplate(sender, elements);
 
+        // Pagination and navigation buttons
         const buttons = [];
-        if (totalAvailableProducts > (page + 1) * pageSize) {
+        if (totalProducts > (page + 1) * pageSize) {
             buttons.push({ type: "postback", title: "➡️ หน้าถัดไป", payload: `MORE_PRODUCTS_${categoryName}_${page + 1}` });
         }
-         buttons.push({ type: "postback", title: "กลับไปหมวดหมู่", payload: "SHOW_CATEGORIES" });
-         buttons.push({ type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" });
-        await sendButtonTemplate(sender, `แสดง ${skip + 1}-${skip + productsToShow.length} จาก ${totalAvailableProducts} รายการพร้อมส่ง`, buttons);
+        buttons.push({ type: "postback", title: "กลับไปหมวดหมู่", payload: "SHOW_CATEGORIES" });
+        buttons.push({ type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" });
+
+        await sendButtonTemplate(sender, `แสดง ${skip + 1}-${skip + productsToShow.length} จาก ${totalProducts} รายการ`, buttons);
 
     } catch (error) {
         console.error(`Error in showProductsByCategory: ${error.message}`);
         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงสินค้า");
     }
 }
+
 async function showProductDetail(sender, productId) {
     try {
         const product = shopData.products.find(p => p.id === productId);
@@ -596,24 +480,30 @@ async function showProductDetail(sender, productId) {
             await sendMessage(sender, "ขออภัย ไม่พบสินค้าที่คุณต้องการ");
             return;
         }
-        product.stock = Array.isArray(product.stockItems) ? product.stockItems.length : 0; // Refresh stock count
 
-        await sendImageMessage(sender, product.imageUrl || "https://via.placeholder.com/300x200/EEE/777?text=Product"); // Placeholder
+         const stockCount = product.downloadUrls?.length || 0;
+
+        await sendImageMessage(sender, product.imageUrl || "https://via.placeholder.com/300x200?text=Product");
+
         let detailText = `✨ ${product.name}\n`;
-        detailText += `💰 ราคา: ฿${product.price.toFixed(2)}\n`; // Format price
-        detailText += `📦 สถานะ: ${product.stock > 0 ? '✅ พร้อมส่ง' : '❌ สินค้าหมด'}\n`;
-        if (product.stock > 0) detailText += `📊 คงเหลือ: ${product.stock} ชิ้น\n`;
+        detailText += `💰 ราคา: ฿${product.price}\n`;
+        detailText += `📦 สถานะ: ${stockCount > 0 ? '✅ พร้อมส่ง' : '❌ สินค้าหมด'}\n`;
+        if (stockCount > 0) {
+            detailText += `📊 คงเหลือ: ${stockCount} ชิ้น\n`;
+        }
         if (product.language) detailText += `⌨️ ภาษา: ${product.language}\n`;
         if (product.version) detailText += `🔄 เวอร์ชัน: ${product.version}\n`;
         detailText += `📄 รายละเอียด: ${product.description || 'ไม่มีรายละเอียดเพิ่มเติม'}`;
+
         await sendMessage(sender, detailText);
 
         const buttons = [];
-        if (product.stock > 0) {
-            buttons.push({ type: "postback", title: "➕ หยิบใส่ตะกร้า", payload: `PRODUCT_ADD_TO_CART_${product.id}` });
+        if (stockCount > 0) {
+            buttons.push({ type: "postback", title: "➕ หยิบใส่ตะกร้า (1 ชิ้น)", payload: `PRODUCT_ADD_TO_CART_${product.id}` });
         }
         buttons.push({ type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" });
-        buttons.push({ type: "web_url", title: "💬 ติดต่อแอดมิน", url: loadedConfig.adminContactLink || '#' });
+        buttons.push({ type: "web_url", title: "💬 ติดต่อแอดมิน", url: "https://m.me/61555184860915" });
+
         await sendButtonTemplate(sender, "ดำเนินการต่อ:", buttons);
 
     } catch (error) {
@@ -621,50 +511,38 @@ async function showProductDetail(sender, productId) {
         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงรายละเอียดสินค้า");
     }
 }
+
 async function addToCart(sender, productId) {
     try {
         const product = shopData.products.find(p => p.id === productId);
-        if (!product) return await sendMessage(sender, "ขออภัย ไม่พบสินค้านี้");
-
-        product.stock = Array.isArray(product.stockItems) ? product.stockItems.length : 0; // Refresh stock
-        if (product.stock <= 0) return await sendMessage(sender, `ขออภัย ${product.name} หมดสต็อกแล้ว`);
-
-        const user = getUserData(sender);
-        const existingItemIndex = user.cart.findIndex(item => item.productId === productId);
-
-        if (existingItemIndex > -1) {
-            const currentQuantityInCart = user.cart[existingItemIndex].quantity;
-            if (currentQuantityInCart + 1 > product.stock) {
-                return await sendMessage(sender, `ขออภัย เพิ่ม ${product.name} ไม่ได้แล้ว มีในสต็อกเพียง ${product.stock} ชิ้น (คุณมีในตะกร้า ${currentQuantityInCart} ชิ้น)`);
-            }
-            user.cart[existingItemIndex].quantity++;
-            await sendMessage(sender, `✅ เพิ่มจำนวน ${product.name} เป็น ${user.cart[existingItemIndex].quantity} ชิ้นในตะกร้า`);
-        } else {
-            if (1 > product.stock) {
-                return await sendMessage(sender, `ขออภัย เพิ่ม ${product.name} ไม่ได้แล้ว มีในสต็อกเพียง ${product.stock} ชิ้น`);
-            }
-            user.cart.push({
-                productId: productId,
-                name: product.name,
-                price: product.price,
-                imageUrl: product.imageUrl,
-                quantity: 1
-            });
-            await sendMessage(sender, `✅ เพิ่ม ${product.name} ลงตะกร้าเรียบร้อย`);
+        if (!product) {
+            return await sendMessage(sender, "ขออภัย ไม่พบสินค้านี้");
         }
+        const stockCount = product.downloadUrls?.length || 0;
+        if (stockCount <= 0) {
+            return await sendMessage(sender, `ขออภัย ${product.name} หมดสต็อกแล้ว`);
+        }
+        const user = getUserData(sender);
+        user.cart.push({
+            cartItemId: `CART-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            productId: productId,
+            name: product.name,
+            price: product.price,
+            imageUrl: product.imageUrl
+        });
         saveShopData();
-
+        await sendMessage(sender, `✅ เพิ่ม ${product.name} (1 ชิ้น) ลงตะกร้าเรียบร้อย`);
         await sendButtonTemplate(sender, "ดำเนินการต่อ:", [
             { type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" },
-            { type: "postback", title: `กลับไปหมวดหมู่ ${product.category}`, payload: `CATEGORY_${product.category}` },
+            { type: "postback", title: `กลับไปหมวดหมู่ ${product.category}`, payload: `CATEGORY_${product.category}`},
             { type: "postback", title: "💰 ชำระเงิน", payload: "CHECKOUT" }
         ]);
-
     } catch (error) {
         console.error(`Error in addToCart: ${error.message}`);
         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการเพิ่มสินค้าลงตะกร้า");
     }
 }
+
 async function viewCart(sender) {
     try {
         const user = getUserData(sender);
@@ -673,82 +551,61 @@ async function viewCart(sender) {
             await sendButtonTemplate(sender, "เลือกซื้อสินค้ากัน!", [{ type: "postback", title: "เลือกหมวดหมู่", payload: "SHOW_CATEGORIES" }]);
             return;
         }
-
         let totalAmount = 0;
         let cartSummary = "🛒 ตะกร้าสินค้าของคุณ:\n\n";
         const cartQuickReplies = [];
-
-        user.cart.forEach((item, index) => {
-            const itemTotal = item.price * item.quantity;
-            totalAmount += itemTotal;
-            cartSummary += `${index + 1}. ${item.name} (฿${item.price.toFixed(2)} x ${item.quantity} = ฿${itemTotal.toFixed(2)})\n`;
-            const shortName = item.name.length > 12 ? item.name.substring(0, 10) + '...' : item.name;
-            cartQuickReplies.push({
-                content_type: "text",
-                title: `ลบ ${shortName}`,
-                payload: `CART_REMOVE_${item.productId}`
-            });
+        const groupedItems = {};
+        user.cart.forEach((item) => {
+            totalAmount += item.price;
+            if (!groupedItems[item.productId]) {
+                groupedItems[item.productId] = { ...item, quantity: 0, cartItemIds: [] };
+            }
+            groupedItems[item.productId].quantity++;
+            groupedItems[item.productId].cartItemIds.push(item.cartItemId);
+        });
+        Object.values(groupedItems).forEach((groupedItem, index) => {
+             const itemTotal = groupedItem.price * groupedItem.quantity;
+             cartSummary += `${index + 1}. ${groupedItem.name} (฿${groupedItem.price} x ${groupedItem.quantity} = ฿${itemTotal})\n`;
+             cartQuickReplies.push({
+                 content_type: "text",
+                 title: `ลบ ${groupedItem.name.substring(0,15)}${groupedItem.name.length > 15 ? '...' : ''} (1 ชิ้น)`,
+                 payload: `CART_REMOVE_INSTANCE_${groupedItem.cartItemIds[0]}`
+             });
         });
         cartSummary += `\n💰 ยอดรวมทั้งสิ้น: ฿${totalAmount.toFixed(2)}`;
-
-        let autoPromoApplicable = false;
-        if (loadedConfig.autoPromotionEnabled &&
-            loadedConfig.autoPromotionPercentage > 0 &&
-            totalAmount >= loadedConfig.autoPromotionMinPurchase)
-        {
-            autoPromoApplicable = true;
-            const discountValue = totalAmount * (loadedConfig.autoPromotionPercentage / 100);
-            cartSummary += `\n\n✨ โปรฯ อัตโนมัติ! ลด ${loadedConfig.autoPromotionPercentage}% (฿${discountValue.toFixed(2)}) เมื่อชำระเงิน`;
-            if (loadedConfig.autoPromotionMinPurchase > 0) {
-                cartSummary += ` (ซื้อครบ ${loadedConfig.autoPromotionMinPurchase.toFixed(2)}฿)`;
-            }
-        } else if (loadedConfig.autoPromotionEnabled && loadedConfig.autoPromotionPercentage > 0 && loadedConfig.autoPromotionMinPurchase > 0) {
-             const remaining = loadedConfig.autoPromotionMinPurchase - totalAmount;
-             if (remaining > 0) {
-                 cartSummary += `\n\n✨ ซื้อเพิ่มอีก ฿${remaining.toFixed(2)} เพื่อรับส่วนลด ${loadedConfig.autoPromotionPercentage}%!`;
-             }
-        }
-
         await sendMessage(sender, cartSummary);
-
-        if (cartQuickReplies.length > 10) cartQuickReplies.splice(10);
-        if (cartQuickReplies.length < 11) cartQuickReplies.push({ content_type: "text", title: "ล้างตะกร้า", payload: "CART_CLEAR" });
-        if (cartQuickReplies.length < 12) cartQuickReplies.push({ content_type: "text", title: "💰 ชำระเงิน", payload: "CHECKOUT" });
-        if (cartQuickReplies.length < 13 && !autoPromoApplicable) {
-            cartQuickReplies.push({ content_type: "text", title: "🏷️ ใช้ส่วนลด", payload: "APPLY_DISCOUNT_PROMPT" });
-        }
-
-        await sendQuickReplies(sender, "จัดการตะกร้าสินค้า:", cartQuickReplies);
-
-        const buttons = [ { type: "postback", title: "💰 ชำระเงิน", payload: "CHECKOUT" } ];
-        if (!autoPromoApplicable) {
-            buttons.push({ type: "postback", title: "🏷️ ใช้ส่วนลด", payload: "APPLY_DISCOUNT_PROMPT" });
-        }
-         buttons.push({ type: "postback", title: "เลือกซื้อเพิ่ม", payload: "SHOW_CATEGORIES" });
-
-        await sendButtonTemplate(sender, "เลือกดำเนินการต่อ:", buttons);
-
+        if (cartQuickReplies.length < 12) cartQuickReplies.push({ content_type: "text", title: "ล้างตะกร้า", payload: "CART_CLEAR" });
+        if (cartQuickReplies.length < 13) cartQuickReplies.push({ content_type: "text", title: "ชำระเงิน", payload: "CHECKOUT" });
+        await sendQuickReplies(sender, "จัดการตะกร้าสินค้า:", cartQuickReplies.slice(0, 13));
+        await sendButtonTemplate(sender, "เลือกดำเนินการต่อ:", [
+            { type: "postback", title: "💰 ชำระเงิน", payload: "CHECKOUT" },
+            { type: "postback", title: "เลือกซื้อเพิ่ม", payload: "SHOW_CATEGORIES" },
+            { type: "postback", title: "ล้างตะกร้า", payload: "CART_CLEAR" }
+        ]);
     } catch (error) {
         console.error(`Error in viewCart: ${error.message}`);
         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงตะกร้าสินค้า");
     }
 }
-async function removeFromCart(sender, productId) {
+
+async function removeFromCartInstance(sender, cartItemIdToRemove) {
     try {
         const user = getUserData(sender);
-        const itemIndex = user.cart.findIndex(item => item.productId === productId);
-        if (itemIndex === -1) return await sendMessage(sender, "ไม่พบสินค้านี้ในตะกร้า");
-
+        const itemIndex = user.cart.findIndex(item => item.cartItemId === cartItemIdToRemove);
+        if (itemIndex === -1) {
+            return await sendMessage(sender, "ไม่พบรายการสินค้านี้ในตะกร้า (อาจถูกลบไปแล้ว)");
+        }
         const removedItemName = user.cart[itemIndex].name;
         user.cart.splice(itemIndex, 1);
         saveShopData();
-        await sendMessage(sender, `🗑️ ลบ ${removedItemName} ออกจากตะกร้าแล้ว`);
-        await viewCart(sender); // Show updated cart
+        await sendMessage(sender, `🗑️ ลบ ${removedItemName} (1 ชิ้น) ออกจากตะกร้าแล้ว`);
+        await viewCart(sender);
     } catch (error) {
-        console.error(`Error in removeFromCart: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการลบสินค้า");
+        console.error(`Error in removeFromCartInstance: ${error.message}`);
+        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการลบสินค้าออกจากตะกร้า");
     }
 }
+
 async function clearCart(sender) {
     try {
         const user = getUserData(sender);
@@ -758,837 +615,458 @@ async function clearCart(sender) {
         await sendButtonTemplate(sender, "เริ่มต้นเลือกซื้อสินค้าใหม่ได้เลย", [{ type: "postback", title: "เลือกหมวดหมู่", payload: "SHOW_CATEGORIES" }]);
     } catch (error) {
         console.error(`Error in clearCart: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการล้างตะกร้า");
+        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการล้างตะกร้าสินค้า");
     }
 }
-// --- End Shop Logic ---
+// --- End Shop Logic Functions ---
 
-// --- Checkout and Payment Processing ---
+
+// --- Checkout and Payment Processing (Using runtimeConfig) ---
 async function checkout(sender) {
     try {
         const user = getUserData(sender);
         if (!user.cart || user.cart.length === 0) {
-            await sendMessage(sender, "🛒 ตะกร้าของคุณว่างเปล่า ไม่สามารถดำเนินการต่อได้");
+            await sendMessage(sender, "🛒 ตะกร้าของคุณว่างเปล่า ไม่สามารถชำระเงินได้");
             await sendButtonTemplate(sender, "เลือกซื้อสินค้ากัน!", [{ type: "postback", title: "เลือกหมวดหมู่", payload: "SHOW_CATEGORIES" }]);
             return;
         }
 
-        let originalTotalAmount = 0;
+        let totalAmount = 0;
         let hasInsufficientStock = false;
         let stockIssues = [];
+        const itemsNeeded = {};
 
-        for (const item of user.cart) {
-            const product = shopData.products.find(p => p.id === item.productId);
-            const availableStock = product ? (Array.isArray(product.stockItems) ? product.stockItems.length : 0) : 0;
-            if (!product || availableStock < item.quantity) {
+        user.cart.forEach(item => {
+            totalAmount += item.price;
+            itemsNeeded[item.productId] = (itemsNeeded[item.productId] || 0) + 1;
+        });
+
+        for (const productId in itemsNeeded) {
+            const product = shopData.products.find(p => p.id === productId);
+            const neededCount = itemsNeeded[productId];
+            const availableCount = product?.downloadUrls?.length || 0;
+            if (!product || availableCount < neededCount) {
                 hasInsufficientStock = true;
-                stockIssues.push(`${item.name} (ต้องการ ${item.quantity}, มี ${availableStock})`);
-            } else {
-                originalTotalAmount += item.price * item.quantity;
+                stockIssues.push(`${product ? product.name : `ID ${productId}`} (ต้องการ ${neededCount}, มี ${availableCount})`);
             }
         }
 
         if (hasInsufficientStock) {
-            await sendMessage(sender, `❌ ขออภัย มีสินค้าบางรายการในตะกร้าไม่เพียงพอ:\n- ${stockIssues.join('\n- ')}\nกรุณาปรับปรุงตะกร้าของคุณก่อน`);
+            await sendMessage(sender, `❌ ขออภัย มีสินค้าบางรายการในตะกร้าไม่เพียงพอ:\n- ${stockIssues.join('\n- ')}\nกรุณาปรับปรุงตะกร้าของคุณก่อนชำระเงิน`);
             await viewCart(sender);
             return;
         }
 
-        let autoDiscountAmount = 0;
-        let autoPromoApplied = false;
-        if (loadedConfig.autoPromotionEnabled &&
-            loadedConfig.autoPromotionPercentage > 0 &&
-            originalTotalAmount >= loadedConfig.autoPromotionMinPurchase)
-        {
-            autoDiscountAmount = originalTotalAmount * (loadedConfig.autoPromotionPercentage / 100);
-            autoPromoApplied = true;
-            console.log(`Auto promotion applied for ${sender}: ${loadedConfig.autoPromotionPercentage}% on ${originalTotalAmount.toFixed(2)} THB. Discount: ${autoDiscountAmount.toFixed(2)} THB`);
-        }
-
-        user.checkoutState = {
-            originalTotalAmount: originalTotalAmount,
-            finalAmount: autoPromoApplied ? (originalTotalAmount - autoDiscountAmount) : originalTotalAmount,
-            discountCode: autoPromoApplied ? 'AUTO_PROMO' : null,
-            discountAmount: autoPromoApplied ? autoDiscountAmount : 0,
-            autoDiscountApplied: autoPromoApplied,
-            paymentMethod: null,
-            step: autoPromoApplied ? 'select_method' : 'awaiting_discount_or_payment'
-        };
+        user.checkoutState = { step: 'select_method', totalAmount: totalAmount };
         saveShopData();
 
-        await sendMessage(sender, `🛒 ยอดรวมสินค้า: ฿${originalTotalAmount.toFixed(2)}`);
-
-        if (autoPromoApplied) {
-            await sendMessage(sender, `✨ ใช้โปรโมชั่นอัตโนมัติสำเร็จ!\nส่วนลด ${loadedConfig.autoPromotionPercentage}%: ฿${autoDiscountAmount.toFixed(2)}\nยอดรวมใหม่: ฿${user.checkoutState.finalAmount.toFixed(2)}`);
-            await showPaymentOptions(sender);
-        } else {
-            await sendQuickReplies(sender, "คุณมีโค้ดส่วนลดหรือไม่?", [
-                { content_type: "text", title: "🏷️ มีโค้ด", payload: "APPLY_DISCOUNT_PROMPT" },
-                { content_type: "text", title: "⏩ ไม่มี / ข้าม", payload: "SKIP_DISCOUNT" }
-            ]);
-        }
-
-    } catch (error) {
-        console.error(`Error in checkout start: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการเริ่มขั้นตอนชำระเงิน");
-        const user = getUserData(sender);
-        if (user.checkoutState) { delete user.checkoutState; saveShopData(); }
-    }
-}
-async function promptForDiscountCode(sender) {
-    try {
-        const user = getUserData(sender);
-        if (!user.checkoutState || !['awaiting_discount_or_payment', 'awaiting_discount_code'].includes(user.checkoutState.step) ) {
-             console.warn(`User ${sender} attempted APPLY_DISCOUNT_PROMPT in wrong state: ${user.checkoutState?.step}`);
-             if (user.checkoutState?.autoDiscountApplied) {
-                 await sendMessage(sender, "ระบบได้ใช้โปรโมชั่นอัตโนมัติให้แล้ว ไม่สามารถใช้โค้ดส่วนลดอื่นได้ครับ");
-                 return;
-             }
-             await sendMessage(sender, "สถานะไม่ถูกต้อง กรุณาลองเริ่มชำระเงินใหม่");
-             if (user.checkoutState) { await cancelPayment(sender); }
-             return;
-        }
-        user.checkoutState.step = 'awaiting_discount_code';
-        saveShopData();
-        await sendMessage(sender, "กรุณาพิมพ์ 'โค้ดส่วนลด' ที่คุณมี:");
-        await sendButtonTemplate(sender, "หากไม่มี กดข้าม", [{ type: "postback", title: "⏩ ข้าม", payload: "SKIP_DISCOUNT" }]);
-    } catch (error) {
-         console.error(`Error in promptForDiscountCode: ${error.message}`);
-         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาด");
-    }
-}
-async function skipDiscountAndProceed(sender) {
-    try {
-        const user = getUserData(sender);
-        if (!user.checkoutState || !['awaiting_discount_or_payment', 'awaiting_discount_code'].includes(user.checkoutState.step)) {
-            console.warn(`User ${sender} attempted SKIP_DISCOUNT in wrong state: ${user.checkoutState?.step}`);
-            if (user.checkoutState?.autoDiscountApplied && user.checkoutState.step === 'select_method') {
-                 await showPaymentOptions(sender);
-                 return;
-            }
-             if (user.checkoutState) await cancelPayment(sender);
-            return;
-        }
-        user.checkoutState.discountCode = null;
-        user.checkoutState.discountAmount = 0;
-        user.checkoutState.finalAmount = user.checkoutState.originalTotalAmount;
-        user.checkoutState.step = 'select_method';
-        saveShopData();
-
-        await showPaymentOptions(sender);
-    } catch (error) {
-        console.error(`Error in skipDiscountAndProceed: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาด");
-        if (getUserData(sender).checkoutState) await cancelPayment(sender);
-    }
-}
-async function applyDiscountCode(sender, codeInput) {
-    try {
-        const user = getUserData(sender);
-        const code = codeInput.trim().toUpperCase();
-
-        if (!user.checkoutState || user.checkoutState.step !== 'awaiting_discount_code') {
-            console.warn(`User ${sender} sent discount code '${code}' in wrong state: ${user.checkoutState?.step}`);
-            if (user.checkoutState?.step === 'select_method') return;
-            await sendMessage(sender, "สถานะไม่ถูกต้อง กรุณาเริ่มชำระเงินใหม่");
-            if (user.checkoutState) await cancelPayment(sender);
-            return;
-        }
-
-        if (user.checkoutState.autoDiscountApplied) {
-            await sendMessage(sender, "ระบบได้ใช้โปรโมชั่นอัตโนมัติให้แล้ว ไม่สามารถใช้โค้ดส่วนลดอื่นได้ครับ");
-            user.checkoutState.step = 'select_method';
-            saveShopData();
-            await showPaymentOptions(sender);
-            return;
-        }
-
-        const originalTotal = user.checkoutState.originalTotalAmount;
-        const foundCode = discountCodes.find(dc => dc.code === code);
-
-        if (!foundCode) {
-            await sendMessage(sender, `⚠️ ไม่พบโค้ดส่วนลด "${code}" กรุณาลองใหม่ หรือกดข้าม`);
-            return;
-        }
-        if (foundCode.expiresAt && new Date(foundCode.expiresAt) < new Date()) {
-            await sendMessage(sender, `⚠️ โค้ดส่วนลด "${code}" หมดอายุแล้ว`);
-            return;
-        }
-        if (foundCode.maxUses !== null && (foundCode.uses || 0) >= foundCode.maxUses) {
-            await sendMessage(sender, `⚠️ โค้ดส่วนลด "${code}" ถูกใช้ครบจำนวนแล้ว`);
-            return;
-        }
-        if (foundCode.minPurchase > 0 && originalTotal < foundCode.minPurchase) {
-            await sendMessage(sender, `⚠️ ต้องมียอดซื้อขั้นต่ำ ฿${foundCode.minPurchase.toFixed(2)} เพื่อใช้โค้ด "${code}" (ยอดปัจจุบัน ฿${originalTotal.toFixed(2)})`);
-            return;
-        }
-
-        let discountAmount = 0;
-        if (foundCode.type === 'percentage') {
-            discountAmount = originalTotal * (foundCode.value / 100);
-        } else if (foundCode.type === 'fixed') {
-            discountAmount = foundCode.value;
-        }
-        discountAmount = Math.min(discountAmount, originalTotal);
-
-        user.checkoutState.discountCode = foundCode.code;
-        user.checkoutState.discountAmount = discountAmount;
-        user.checkoutState.finalAmount = originalTotal - discountAmount;
-        user.checkoutState.step = 'select_method';
-        saveShopData();
-
-        await sendMessage(sender, `✅ ใช้โค้ดส่วนลด "${foundCode.code}" สำเร็จ!\nส่วนลด: ฿${discountAmount.toFixed(2)}\nยอดรวมใหม่: ฿${user.checkoutState.finalAmount.toFixed(2)}`);
-        await showPaymentOptions(sender);
-
-    } catch (error) {
-        console.error(`Error applying discount code ${codeInput} for ${sender}: ${error.message}`);
-        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการใช้โค้ดส่วนลด");
-        if (getUserData(sender).checkoutState) await cancelPayment(sender);
-    }
-}
-async function showPaymentOptions(sender) {
-     try {
-        const user = getUserData(sender);
-        if (!user.checkoutState || user.checkoutState.step !== 'select_method') {
-             console.warn(`User ${sender} in showPaymentOptions with wrong state: ${user.checkoutState?.step}`);
-             await sendMessage(sender, "สถานะไม่ถูกต้อง กรุณาเริ่มขั้นตอนชำระเงินใหม่");
-             if (user.checkoutState) await cancelPayment(sender);
-             return;
-        }
-
-        const finalAmount = user.checkoutState.finalAmount;
-
-        let summary = `ยอดรวมที่ต้องชำระ: ฿${finalAmount.toFixed(2)}`;
-        if (user.checkoutState.discountAmount > 0) {
-             const discountSource = user.checkoutState.autoDiscountApplied ? `โปรโมชั่นอัตโนมัติ ${loadedConfig.autoPromotionPercentage}%` : `โค้ด ${user.checkoutState.discountCode}`;
-             summary += ` (จาก ฿${user.checkoutState.originalTotalAmount.toFixed(2)}, ส่วนลด ${discountSource}: ฿${user.checkoutState.discountAmount.toFixed(2)})`;
-        }
-        await sendMessage(sender, summary);
+        await sendMessage(sender, `ยอดรวมที่ต้องชำระ: ฿${totalAmount.toFixed(2)}`);
         await sendMessage(sender, "กรุณาเลือกช่องทางการชำระเงิน หรือใช้โค้ดรับของ:");
 
-        const walletImg = loadedConfig.walletImage || "https://via.placeholder.com/300x200/FFF/000?text=Wallet";
-        const bankImg = loadedConfig.bankImage || "https://via.placeholder.com/300x200/EEE/777?text=Bank";
-        const redeemImg = loadedConfig.codeRedemptionImage || "https://via.placeholder.com/300x200/DDD/555?text=Code";
-
+        // Use config for images and bank details
         const paymentElements = [
-            {
-                title: "TrueMoney Wallet (ซองอั่งเปา)",
-                subtitle: `สร้างและส่งซองอั่งเปามูลค่า ฿${finalAmount.toFixed(2)}`,
-                image_url: walletImg,
-                buttons: [{ type: "postback", title: "เลือก Wallet", payload: "PAYMENT_ANGPAO" }]
-            },
-            {
-                title: "โอนเงินผ่านธนาคาร",
-                subtitle: `โอนเงิน ฿${finalAmount.toFixed(2)}\n${(loadedConfig.bankAccountDetails || '').split('\n')[0]}`,
-                image_url: bankImg,
-                buttons: [{ type: "postback", title: "เลือก ธนาคาร", payload: "PAYMENT_BANK" }]
-            },
-            {
-                title: "ใช้โค้ดรับของ",
-                subtitle: "กรอกโค้ด 32 หลักที่คุณมี",
-                image_url: redeemImg,
-                buttons: [{ type: "postback", title: "เลือกใช้โค้ด", payload: "PAYMENT_REDEEM_CODE" }]
-            }
+            { title: "TrueMoney Wallet (ซองอั่งเปา)", subtitle: `สร้างและส่งซองอั่งเปามูลค่า ฿${totalAmount.toFixed(2)}\nระบบจะรับซองอัตโนมัติ`, image_url: runtimeConfig.walletImage || "https://via.placeholder.com/300x200?text=Wallet", buttons: [{ type: "postback", title: "เลือกชำระผ่าน Wallet", payload: "PAYMENT_ANGPAO" }] },
+            { title: "โอนเงินผ่านธนาคาร", subtitle: `โอนเงิน ฿${totalAmount.toFixed(2)}\n${(runtimeConfig.bankAccountDetails || "ติดต่อแอดมิน").split('\n')[0]}`, image_url: runtimeConfig.bankImage || "https://via.placeholder.com/300x200?text=Bank", buttons: [{ type: "postback", title: "เลือกชำระผ่านธนาคาร", payload: "PAYMENT_BANK" }] },
+            { title: "ใช้โค้ดรับของ", subtitle: "กรอกโค้ด 32 หลักที่คุณมี เพื่อรับสินค้า", image_url: runtimeConfig.codeRedemptionImage || "https://via.placeholder.com/300x200?text=Code", buttons: [{ type: "postback", title: "เลือกใช้โค้ด", payload: "PAYMENT_REDEEM_CODE" }] }
         ];
+
         await sendGenericTemplate(sender, paymentElements);
         await sendButtonTemplate(sender, "หากต้องการยกเลิก", [{ type: "postback", title: "❌ ยกเลิก", payload: "CANCEL_PAYMENT" }]);
 
     } catch (error) {
-         console.error(`Error in showPaymentOptions: ${error.message}`);
-         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงตัวเลือกชำระเงิน");
-         await cancelPayment(sender);
+        console.error(`Error in checkout: ${error.message}`);
+        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในขั้นตอนการชำระเงิน กรุณาลองใหม่");
+        const user = getUserData(sender);
+        if (user.checkoutState) {
+            delete user.checkoutState;
+            saveShopData();
+        }
     }
 }
+
 async function processPaymentMethod(sender, method) {
     try {
         const user = getUserData(sender);
         if (!user.checkoutState || user.checkoutState.step !== 'select_method') {
-            await sendMessage(sender, "สถานะไม่ถูกต้อง กรุณาเริ่มขั้นตอนชำระเงินใหม่");
-             if (user.checkoutState) await cancelPayment(sender);
+            await sendMessage(sender, "สถานะไม่ถูกต้อง กรุณาเริ่มขั้นตอนการชำระเงินใหม่อีกครั้ง");
+            await checkout(sender); // Re-initiate checkout
             return;
         }
-
-        const finalAmount = user.checkoutState.finalAmount;
+        const totalAmount = user.checkoutState.totalAmount;
         const cancelButton = { type: "postback", title: "❌ ยกเลิก", payload: "CANCEL_PAYMENT" };
 
         if (method === 'angpao') {
-            if (!loadedConfig.walletPhone || !/^[0-9]{10}$/.test(loadedConfig.walletPhone)) {
-                await sendMessage(sender, "❌ ขออภัย ระบบ Wallet ไม่พร้อมใช้งานขณะนี้ กรุณาติดต่อแอดมิน");
-                console.error("Angpao Error: Wallet phone number for redeeming is not configured or invalid in settings.");
-                await cancelPayment(sender);
-                return;
-            }
             user.checkoutState.step = 'awaiting_angpao_link';
             user.checkoutState.paymentMethod = 'angpao';
-            saveShopData();
-            await sendMessage(sender, `📱 กรุณาสร้างซองอั่งเปา TrueMoney Wallet มูลค่า ฿${finalAmount.toFixed(2)}`);
-            await sendButtonTemplate(sender, "จากนั้นส่ง 'ลิงก์ซองอั่งเปา' มาที่นี่ (ระบบจะทำการกดรับซองเพื่อยืนยัน)", [cancelButton]);
+            await sendMessage(sender, `📱 กรุณาสร้างซองอั่งเปา TrueMoney Wallet มูลค่า ฿${totalAmount.toFixed(2)}`);
+            await sendButtonTemplate(sender, "จากนั้นส่ง 'ลิงก์ซองอั่งเปา' ที่สร้างเสร็จมาที่นี่ ระบบจะตรวจสอบและรับซองเข้าเบอร์ร้านค้าโดยอัตโนมัติ\n\nตัวอย่าง:\nhttps://gift.truemoney.com/campaign/?v=...", [cancelButton]);
         } else if (method === 'bank') {
-            if (!loadedConfig.bankAccountDetails || loadedConfig.bankAccountDetails.trim().length < 10) {
-                 await sendMessage(sender, "❌ ขออภัย ไม่ได้ตั้งค่าข้อมูลบัญชีธนาคาร หรือข้อมูลสั้นเกินไป กรุณาติดต่อแอดมิน");
-                 await cancelPayment(sender);
-                 return;
-            }
             user.checkoutState.step = 'awaiting_bank_slip';
             user.checkoutState.paymentMethod = 'bank';
-            saveShopData();
-            await sendMessage(sender, `🏦 กรุณาโอนเงินจำนวน ฿${finalAmount.toFixed(2)} มาที่บัญชี:`);
-            await sendMessage(sender, loadedConfig.bankAccountDetails);
-            await sendButtonTemplate(sender, "เมื่อโอนเสร็จแล้ว กรุณา 'ส่งรูปสลิป' มาที่นี่", [cancelButton]);
+            await sendMessage(sender, `🏦 กรุณาโอนเงินจำนวน ฿${totalAmount.toFixed(2)} มาที่บัญชี:`);
+            await sendMessage(sender, runtimeConfig.bankAccountDetails || "!! ไม่ได้ตั้งค่าบัญชีธนาคาร กรุณาติดต่อแอดมิน !!"); // Use config
+            await sendButtonTemplate(sender, "เมื่อโอนเงินเรียบร้อยแล้ว กรุณา 'ส่งรูปสลิป' การโอนเงินมาที่นี่เพื่อตรวจสอบ", [cancelButton]);
         } else if (method === 'redeem_code') {
             user.checkoutState.step = 'awaiting_redeem_code';
             user.checkoutState.paymentMethod = 'redeem_code';
-            saveShopData();
-            await sendMessage(sender, `🔑 กรุณาส่ง 'โค้ดรับของ' (32 ตัวอักษร) ที่คุณได้รับมา`);
+            await sendMessage(sender, `🔑 กรุณาส่ง 'โค้ดรับของ' (ความยาว 32 ตัวอักษร) ที่คุณได้รับมาที่นี่`);
             await sendButtonTemplate(sender, "พิมพ์โค้ดของคุณแล้วส่งได้เลย", [cancelButton]);
         } else {
             await sendMessage(sender, "❌ วิธีการชำระเงินไม่ถูกต้อง");
-            user.checkoutState.step = 'select_method'; saveShopData();
-             await showPaymentOptions(sender);
+            user.checkoutState.step = 'select_method'; // Stay on selection step
         }
+        saveShopData(); // Save state change
     } catch (error) {
-        console.error(`Error processing payment method (${method}): ${error.message}`);
+        console.error(`Error in processPaymentMethod (${method}): ${error.message}`);
         await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาด โปรดลองเลือกวิธีชำระเงินอีกครั้ง");
         const user = getUserData(sender);
-        if (user.checkoutState) {
-            user.checkoutState.step = 'select_method';
-            user.checkoutState.paymentMethod = null;
-            saveShopData();
-            await showPaymentOptions(sender);
-         }
+        if (user.checkoutState) { user.checkoutState.step = 'select_method'; saveShopData(); }
     }
 }
+
 async function handleCheckoutTextInput(sender, text) {
     try {
         const user = getUserData(sender);
         if (!user.checkoutState) return false; // Not in checkout
 
-        if (user.checkoutState.step === 'awaiting_discount_code') {
-            await applyDiscountCode(sender, text);
-            return true; // Handled (successfully or with error message)
-        }
-
+        // Handle Angpao Link
         if (user.checkoutState.step === 'awaiting_angpao_link') {
             const LINK_REGEX = /https:\/\/gift\.truemoney\.com\/campaign\/\?v=([a-zA-Z0-9]{35})/;
             const match = text.trim().match(LINK_REGEX);
             if (!match) {
-                await sendMessage(sender, "⚠️ ลิงก์ซองอั่งเปาไม่ถูกต้อง กรุณาส่งลิงก์ที่ขึ้นต้นด้วย `https://gift.truemoney.com/...`");
-                return true; // Input received, but invalid format, handled by sending message
+                await sendMessage(sender, "⚠️ ลิงก์ซองอั่งเปาไม่ถูกต้อง กรุณาตรวจสอบและส่งลิงก์ที่ถูกต้อง:\n(ตัวอย่าง: https://gift.truemoney.com/campaign/?v=...)");
+                return true; // Handled (as invalid input)
             }
             const angpaoLink = match[0];
-            const phoneToRedeemWith = loadedConfig.walletPhone;
-            const expectedAmount = user.checkoutState.finalAmount;
+            const recipientPhone = runtimeConfig.walletPhone; // Use config
+            const expectedAmount = user.checkoutState.totalAmount;
 
-            if (!phoneToRedeemWith) {
-                console.error("Angpao Error: Wallet phone to redeem with is not configured!");
-                await sendMessage(sender, "❌ เกิดข้อผิดพลาด: ระบบ Wallet ไม่พร้อมใช้งาน กรุณาติดต่อแอดมิน");
-                await cancelPayment(sender); // Critical config error, cancel
+            if (!recipientPhone) {
+                console.error("Angpao Error: Wallet Phone Number is not configured!");
+                await sendMessage(sender, "❌ ขออภัย ระบบยังไม่ได้ตั้งค่าเบอร์ Wallet สำหรับรับเงิน กรุณาติดต่อแอดมิน");
+                 await cancelPayment(sender); // Cancel the process
                 return true;
             }
 
-            await sendMessage(sender, "⏳ กำลังตรวจสอบและรับซองอั่งเปา...");
-            const verificationResult = await verifyAngpaoLink(phoneToRedeemWith, angpaoLink, expectedAmount);
-
+            await sendMessage(sender, "⏳ กำลังตรวจสอบลิงก์ซองอั่งเปา...");
+            const verificationResult = await verifyAngpaoLink(recipientPhone, angpaoLink, expectedAmount);
             if (verificationResult.success) {
-                await sendMessage(sender, `✅ ${verificationResult.message}`);
-                await completeOrder(sender, 'angpao', angpaoLink);
+                await sendMessage(sender, "✅ การชำระเงินผ่านซองอั่งเปาสำเร็จ!");
+                await completeOrder(sender, 'angpao', angpaoLink); // COMPLETE ORDER
             } else {
-                await sendMessage(sender, `❌ การรับซอง ล้มเหลว: ${verificationResult.message}`);
-                // Do NOT cancel payment automatically here, let user retry or cancel manually
+                await sendMessage(sender, `❌ การตรวจสอบล้มเหลว: ${verificationResult.message}`);
+                await sendMessage(sender, "กรุณาตรวจสอบลิงก์ จำนวนเงิน หรือสร้างซองใหม่แล้วส่งลิงก์อีกครั้ง");
             }
-            return true; // Handled the angpao link attempt
+            return true; // Handled
         }
 
+        // Handle Redemption Code
         if (user.checkoutState.step === 'awaiting_redeem_code') {
-            const code = text.trim().toUpperCase();
+            const code = text.trim();
             const CODE_LENGTH = 32;
-            if (code.length !== CODE_LENGTH || !/^[A-Z0-9]{32}$/.test(code)) {
-                await sendMessage(sender, `⚠️ โค้ดไม่ถูกต้อง กรุณาส่งโค้ด ${CODE_LENGTH} ตัวอักษร (A-Z, 0-9)`);
-                return true; // Invalid format, handled
+            if (code.length !== CODE_LENGTH || !/^[a-zA-Z0-9]+$/.test(code)) { // Added alphanumeric check
+                await sendMessage(sender, `⚠️ โค้ดไม่ถูกต้อง กรุณาส่งโค้ดความยาว ${CODE_LENGTH} ตัวอักษร (อังกฤษ/ตัวเลข)`);
+                return true; // Handled (as invalid input)
             }
             await sendMessage(sender, "⏳ กำลังตรวจสอบโค้ด...");
             const verificationResult = await verifyRedemptionCode(code);
             if (verificationResult.success) {
                 await sendMessage(sender, "✅ โค้ดถูกต้อง!");
-                const codeIndex = validRedemptionCodes.findIndex(c => c.toUpperCase() === code); // Ensure case-insensitive match here too
-                if (codeIndex !== -1) {
-                    const removedCode = validRedemptionCodes.splice(codeIndex, 1)[0]; // Get the actual code casing before removing
-                    saveValidRedemptionCodes();
-                    console.log(`Redemption code ${removedCode} used by ${sender} and removed.`);
-                    await completeOrder(sender, 'redeem_code', removedCode); // Pass the actual removed code
-                } else {
-                     console.warn(`Redemption code ${code} verified but not found in list during removal attempt for ${sender}. Possible race condition.`);
-                     await sendMessage(sender, "⚠️ พบปัญหาเล็กน้อยในการลบโค้ด แต่จะดำเนินการสั่งซื้อต่อ กรุณาแจ้งแอดมินหากเกิดปัญหา");
-                     await completeOrder(sender, 'redeem_code', code + ' (Removal Issue)');
-                }
+                // Remove code *before* completing order
+                validRedemptionCodes = validRedemptionCodes.filter(c => c !== code);
+                saveValidRedemptionCodes();
+                console.log(`Redemption code ${code} used by ${sender} and removed.`);
+                await completeOrder(sender, 'redeem_code', code); // COMPLETE ORDER
             } else {
-                await sendMessage(sender, `❌ ตรวจสอบโค้ดล้มเหลว: ${verificationResult.message}`);
-                // Do NOT cancel payment automatically here
+                await sendMessage(sender, `❌ การตรวจสอบโค้ดล้มเหลว: ${verificationResult.message}`);
+                await sendMessage(sender, "กรุณาตรวจสอบโค้ดอีกครั้ง หรือติดต่อแอดมินหากมั่นใจว่าโค้ดถูกต้อง");
             }
-            return true; // Handled the redeem code attempt
+            return true; // Handled
         }
-        // If text input received but not matching any specific step above
-        return false; // Indicate it wasn't handled by checkout text input logic specifically
+
+        // Text received during bank slip step
+         if (user.checkoutState.step === 'awaiting_bank_slip') {
+             await sendMessage(sender, "กรุณา 'ส่งรูปสลิป' เท่านั้น หรือกด 'ยกเลิก'");
+             return true; // Handled (as incorrect input type)
+         }
+
+        return false; // Not handled by this function (e.g., text sent during 'select_method')
 
     } catch (error) {
         console.error(`Error in handleCheckoutTextInput: ${error.message}`);
-        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อมูลชำระเงิน");
+        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อมูลชำระเงิน กรุณาลองใหม่");
         await sendButtonTemplate(sender, "พบข้อผิดพลาด", [{ type: "postback", title: "❌ ยกเลิก", payload: "CANCEL_PAYMENT" }]);
-        return true; // Error occurred, but we handled it by sending messages
+        return true; // Error occurred, stop further processing
     }
 }
+
 async function handleCheckoutImageInput(sender, imageUrl) {
     try {
         const user = getUserData(sender);
         if (!user.checkoutState || user.checkoutState.step !== 'awaiting_bank_slip') return false;
 
-        const expectedAmount = user.checkoutState.finalAmount;
-        await sendMessage(sender, "⏳ ได้รับสลิปแล้ว กำลังตรวจสอบ...");
+        const expectedAmount = user.checkoutState.totalAmount;
+        await sendMessage(sender, "⏳ ได้รับสลิปแล้ว กำลังตรวจสอบกับระบบ...");
+
         const verificationResult = await verifyBankSlipXncly(sender, imageUrl, expectedAmount);
 
         if (verificationResult.success) {
-            await sendMessage(sender, `✅ ${verificationResult.message}`);
+            await sendMessage(sender, "✅ การชำระเงินผ่านการโอนเงินสำเร็จ!");
             const confirmationData = verificationResult.confirmationData || imageUrl;
-            await completeOrder(sender, 'bank', confirmationData);
+            await completeOrder(sender, 'bank', confirmationData); // COMPLETE ORDER
         } else {
-            await sendMessage(sender, `❌ ตรวจสอบสลิปล้มเหลว: ${verificationResult.message}`);
-             // Do NOT cancel payment automatically here
+            await sendMessage(sender, `❌ การตรวจสอบสลิปล้มเหลว: ${verificationResult.message}`);
+            await sendMessage(sender, "กรุณาตรวจสอบสลิป หรือลองส่งรูปใหม่อีกครั้ง");
         }
-        return true; // Handled slip image input
+        return true; // Handled image input
     } catch (error) {
         console.error(`Error in handleCheckoutImageInput: ${error.message}`);
-        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการประมวลผลสลิป");
+        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดในการประมวลผลสลิป กรุณาลองใหม่");
         await sendButtonTemplate(sender, "พบข้อผิดพลาด", [{ type: "postback", title: "❌ ยกเลิก", payload: "CANCEL_PAYMENT" }]);
-        return true; // Error occurred, handled by sending messages
+        return true; // Error occurred
     }
 }
 // --- End Checkout Handling ---
 
-// --- Payment Verification Functions (Angpao REDEEM, Slip transRef) ---
-async function verifyAngpaoLink(phoneToRedeemWith, voucherLink, expectedAmount) {
+
+// --- Payment Verification Functions (Using runtimeConfig for Xncly) ---
+async function verifyAngpaoLink(phoneToRedeem, voucherLink, expectedAmount) {
     const LINK_REGEX = /https:\/\/gift\.truemoney\.com\/campaign\/\?v=([a-zA-Z0-9]{35})/;
-    const voucherHashMatch = voucherLink.match(LINK_REGEX);
-    if (!voucherHashMatch || !voucherHashMatch[1]) {
-        return { success: false, message: 'รูปแบบลิงก์ซองอั่งเปาไม่ถูกต้อง' };
-    }
-    const voucherHash = voucherHashMatch[1];
-
-    if (!phoneToRedeemWith || !/^[0-9]{10}$/.test(phoneToRedeemWith)) {
-        console.error("Angpao Redeem Error: Invalid or missing shop wallet phone number in config:", phoneToRedeemWith);
-        return { success: false, message: 'ข้อผิดพลาดระบบ: ไม่ได้ตั้งค่าเบอร์ Wallet ร้านค้าสำหรับรับซอง' };
-    }
-
-    console.log(`Attempting Angpao Redeem: Hash=${voucherHash}, ShopPhone=${phoneToRedeemWith}, Expected=฿${expectedAmount.toFixed(2)}`);
-
+    const voucherHash = voucherLink.match(LINK_REGEX)?.[1];
+    if (!voucherHash) return { success: false, message: 'รูปแบบลิงก์ซองอั่งเปาไม่ถูกต้อง' };
+    if (!phoneToRedeem) return { success: false, message: 'ไม่ได้กำหนดเบอร์โทรศัพท์ผู้รับ (Wallet Phone) ในระบบ' };
+    console.log(`Attempting to Redeem Angpao: Hash=${voucherHash}, Redeem to Phone=${phoneToRedeem}, Expected=฿${expectedAmount}`);
+    // No typing indicator here, it's internal API call
     try {
-        const response = await axios.post(`https://gift.truemoney.com/campaign/vouchers/${voucherHash}/redeem`,
-            {
-                mobile: phoneToRedeemWith,
-                voucher_hash: voucherHash
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                    'User-Agent': 'FBShopBot/5.2.0' // Update User-Agent slightly
-                 },
-                timeout: 25000
-             }
-        );
-
-        const data = response.data;
-        console.log("Angpao Redeem API Response:", JSON.stringify(data, null, 2));
-
-        if (data?.status?.code === 'SUCCESS' && data?.data?.my_ticket) {
-            const redeemedAmount = parseFloat(data.data.my_ticket.amount_baht);
-            if (isNaN(redeemedAmount)) {
-                console.error("Angpao Redeem Error: Could not parse amount_baht from response.");
-                return { success: false, message: 'รับซองสำเร็จ แต่ไม่สามารถอ่านจำนวนเงินได้! กรุณาติดต่อแอดมิน' };
-            }
-
-            console.log(`Angpao Redeemed Successfully: Amount = ฿${redeemedAmount.toFixed(2)}`);
-
-            if (Math.abs(redeemedAmount - expectedAmount) < 0.01) {
-                return { success: true, message: `การรับซองสำเร็จ ยอดเงิน ฿${redeemedAmount.toFixed(2)}` };
-            } else {
-                console.warn(`Angpao amount mismatch: Redeemed ฿${redeemedAmount.toFixed(2)}, Expected ฿${expectedAmount.toFixed(2)}`);
-                return { success: false, message: `รับซองสำเร็จ แต่จำนวนเงินไม่ตรง! (รับได้ ฿${redeemedAmount.toFixed(2)}, ต้องการ ฿${expectedAmount.toFixed(2)}) โปรดติดต่อแอดมินทันที!` };
+        const response = await fetch(`https://gift.truemoney.com/campaign/vouchers/${voucherHash}/redeem`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ mobile: phoneToRedeem, voucher_hash: voucherHash }),
+        });
+        const data = await response.json();
+        console.log("Angpao API Response:", JSON.stringify(data, null, 2));
+        if (data.status?.code === 'SUCCESS') {
+            const redeemedAmount = parseFloat(data.data?.my_ticket?.amount_baht);
+            console.log(`Angpao Redeemed Amount: ฿${redeemedAmount}`);
+            if (isNaN(redeemedAmount)) return { success: false, message: 'ไม่สามารถอ่านจำนวนเงินจากซองได้หลังจากรับสำเร็จ' };
+            if (Math.abs(redeemedAmount - expectedAmount) < 0.01) return { success: true, message: 'การยืนยันสำเร็จ' };
+            else {
+                console.warn(`Angpao amount mismatch: Redeemed ฿${redeemedAmount}, Expected ฿${expectedAmount}`);
+                return { success: false, message: `จำนวนเงินในซองที่รับได้ (฿${redeemedAmount.toFixed(2)}) ไม่ตรงกับยอดที่ต้องชำระ (฿${expectedAmount.toFixed(2)}) โปรดติดต่อแอดมิน` };
             }
         } else {
-            let errorMessage = data?.status?.message || 'เกิดข้อผิดพลาดที่ไม่รู้จักจาก TrueMoney';
-            const errorCode = data?.status?.code;
-
-            if (errorCode === 'VOUCHER_NOT_FOUND' || errorMessage.includes("VOUCHER_NOT_FOUND")) errorMessage = "ไม่พบซองนี้ หรือลิงก์ไม่ถูกต้อง";
-            else if (errorCode === 'VOUCHER_OUT_OF_STOCK' || errorMessage.includes("VOUCHER_OUT_OF_STOCK")) errorMessage = "ซองนี้ถูกใช้ไปหมดแล้ว";
-            else if (errorCode === 'TARGET_USER_HAS_ALREADY_REDEEMED' || errorMessage.includes("TARGET_USER_HAS_ALREADY_REDEEMED")) errorMessage = "คุณเคยรับซองนี้ไปแล้ว";
-            else if (errorCode === 'VOUCHER_EXPIRED' || errorMessage.includes("VOUCHER_EXPIRED")) errorMessage = "ซองนี้หมดอายุแล้ว";
-            else if (errorCode === 'CAMPAIGN_ENDED' || errorMessage.includes("CAMPAIGN_ENDED")) errorMessage = "แคมเปญของซองนี้สิ้นสุดแล้ว";
-            else if (errorCode === 'OWNER_CANNOT_REDEEM' || errorMessage.includes("OWNER_CANNOT_REDEEM")) errorMessage = "เจ้าของซองไม่สามารถรับเองได้";
-            else if (errorCode === 'INTERNAL_ERROR' || errorMessage.includes("INTERNAL_ERROR") || errorMessage.includes("PROCESS_VOUCHER_FAILED")) errorMessage = "ระบบ TrueMoney ขัดข้อง (Internal Error)";
-            else if (errorMessage.includes("Insufficient balance in campaign")) errorMessage = "ซองนี้ไม่มีเงินเหลือแล้ว";
-
-            console.error("Angpao Redemption Failed:", errorMessage, "| Full API Response:", data);
+            let errorMessage = data.status?.message || 'ไม่สามารถรับซองได้ (ข้อผิดพลาดไม่ทราบสาเหตุ)';
+            if (errorMessage.includes("VOUCHER_OUT_OF_STOCK")) errorMessage = "ซองอั่งเปานี้ถูกใช้ไปหมดแล้ว";
+            else if (errorMessage.includes("VOUCHER_NOT_FOUND")) errorMessage = "ไม่พบซองอั่งเปานี้ หรือลิงก์ไม่ถูกต้อง";
+            else if (errorMessage.includes("TARGET_USER_HAS_ALREADY_REDEEMED")) errorMessage = "เบอร์ร้านค้ารับซองนี้ไปแล้ว";
+            else if (errorMessage.includes("INTERNAL_ERROR") || errorMessage.includes("PROCESS_VOUCHER_FAILED")) errorMessage = "ระบบ TrueMoney ขัดข้องชั่วคราว โปรดลองอีกครั้ง";
+            else if (errorMessage.includes("VOUCHER_EXPIRED")) errorMessage = "ซองอั่งเปานี้หมดอายุแล้ว";
+            console.log("Angpao Redemption Failed:", errorMessage);
             return { success: false, message: `ไม่สามารถรับซองได้: ${errorMessage}` };
         }
     } catch (error) {
-        console.error('Angpao Verification/Redeem Network/Request Error:', error);
-        let friendlyMessage = 'เกิดข้อผิดพลาดในการเชื่อมต่อกับ TrueMoney';
-        if (axios.isAxiosError(error)) {
-             if (error.response) {
-                 console.error('Angpao API Error Response Status:', error.response.status);
-                 console.error('Angpao API Error Response Data:', error.response.data);
-                 friendlyMessage += ` (API Status: ${error.response.status})`;
-                 const apiErrorMsg = error.response.data?.status?.message;
-                 if (apiErrorMsg) {
-                    friendlyMessage = `ไม่สามารถรับซองได้: ${apiErrorMsg}`;
-                 }
-             } else if (error.request) {
-                 friendlyMessage = "ไม่สามารถเชื่อมต่อระบบ TrueMoney ได้ (No Response)";
-             }
-            if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-                 friendlyMessage = "การเชื่อมต่อ TrueMoney ใช้เวลานานเกินไป (Timeout)";
-            }
-        } else {
-            friendlyMessage += `: ${error.message}`;
-        }
-        return { success: false, message: friendlyMessage };
+        console.error('Angpao Verification/Redemption Network Error:', error);
+        return { success: false, message: `เกิดข้อผิดพลาดในการเชื่อมต่อกับ TrueMoney: ${error.message || 'Network Error'}` };
     }
 }
+
 async function downloadImageToBuffer(imageUrl) {
-     if (!imageUrl || !imageUrl.startsWith('http')) {
-         return Promise.reject(new Error("Invalid image URL"));
-     }
     return new Promise((resolve, reject) => {
         const chunks = [];
-        const protocol = imageUrl.startsWith('https') ? https : http;
-        const requestOptions = { timeout: 15000 };
-
-        const req = protocol.get(imageUrl, requestOptions, (response) => {
-            if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-                console.log(`Redirecting image download from ${imageUrl} to ${response.headers.location}`);
-                 const newUrl = new URL(response.headers.location, imageUrl).href;
-                downloadImageToBuffer(newUrl)
-                    .then(resolve)
-                    .catch(reject);
-                req.abort();
-                return;
-            }
-
-            if (response.statusCode !== 200) {
-                response.resume();
-                return reject(new Error(`Download fail: Status Code ${response.statusCode}`));
-            }
-
-            response.on('data', (chunk) => chunks.push(chunk));
-            response.on('end', () => resolve(Buffer.concat(chunks)));
-        });
-
-        req.on('error', (err) => reject(new Error(`Download connection error: ${err.message}`)));
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('Download timed out after 15 seconds'));
-        });
+        const protocol = imageUrl.startsWith('https') ? https : require('http');
+        protocol.get(imageUrl, (response) => {
+            if (response.statusCode !== 200) return reject(new Error(`Failed to download image, status code: ${response.statusCode}`));
+            const writableStream = new Writable({
+                write(chunk, encoding, callback) {
+                    chunks.push(chunk);
+                    callback();
+                }
+            });
+            response.pipe(writableStream);
+            writableStream.on('finish', () => resolve(Buffer.concat(chunks)));
+            writableStream.on('error', (err) => reject(new Error(`Error writing image stream: ${err.message}`)));
+        }).on('error', (err) => reject(new Error(`Error downloading image: ${err.message}`)));
     });
 }
+
 async function verifyBankSlipXncly(sender, imageUrl, expectedAmount) {
-    const clientIdSecret = loadedConfig.xnclyClientIdSecret;
-    const checkUrl = loadedConfig.xnclyCheckUrl;
-    if (!clientIdSecret || !clientIdSecret.includes(':')) return { success: false, message: 'ไม่ได้ตั้งค่า Xncly ClientID:Secret หรือรูปแบบไม่ถูกต้อง (ใน /admin/settings)' };
-    if (!checkUrl || !checkUrl.startsWith('http')) return { success: false, message: 'ไม่ได้ตั้งค่า Xncly CHECK_URL หรือรูปแบบไม่ถูกต้อง (ใน /admin/settings)' };
+    // Use config for Xncly details
+    const { xnclyClientIdSecret, xnclyCheckUrl } = runtimeConfig;
 
-    console.log(`Verifying Slip (Xncly): URL=${imageUrl}, Expected=฿${expectedAmount.toFixed(2)}`);
+    if (!xnclyClientIdSecret || !xnclyClientIdSecret.includes(':')) return { success: false, message: 'ไม่ได้ตั้งค่า Xncly API ClientID:Secret หรือรูปแบบไม่ถูกต้องใน /admin/settings' };
+    if (!xnclyCheckUrl || !isValidUrl(xnclyCheckUrl)) return { success: false, message: 'ไม่ได้ตั้งค่า Xncly API CHECK_URL หรือ URL ไม่ถูกต้องใน /admin/settings' };
+
+    console.log(`Verifying Bank Slip (Xncly): URL=${imageUrl}, Expected=฿${expectedAmount}`);
     await sendTypingIndicator(sender, 'typing_on');
-
     try {
-        await sendMessage(sender, "กำลังโหลดรูปสลิป...");
+        await sendMessage(sender, "กำลังดาวน์โหลดรูปสลิป...");
         const imageBuffer = await downloadImageToBuffer(imageUrl);
-        console.log(`Downloaded buffer size: ${imageBuffer.length} bytes from ${imageUrl}`);
-        if (imageBuffer.length < 1000) {
-            console.warn("Downloaded image seems very small. Might not be a valid slip.");
-        }
-        await sendMessage(sender, "โหลดสำเร็จ กำลังส่งไปตรวจสอบ...");
-
+        console.log(`Downloaded image buffer, size: ${imageBuffer.length} bytes`);
+        await sendMessage(sender, "ดาวน์โหลดสำเร็จ กำลังส่งไปตรวจสอบ...");
         const formData = new FormData();
-        formData.append('ClientID-Secret', clientIdSecret);
+        formData.append('ClientID-Secret', xnclyClientIdSecret);
         formData.append('image', imageBuffer, { filename: 'slip.jpg', contentType: 'image/jpeg' });
-
-        console.log("Sending slip to Xncly API:", checkUrl);
-        const response = await axios.post(checkUrl, formData, {
-            headers: {
-                ...formData.getHeaders(),
-                'User-Agent': 'FBShopBot/5.2.0' // Update User-Agent
-             },
-            timeout: 45000
-        });
+        console.log("Sending slip to Xncly API...");
+        const response = await axios.post(xnclyCheckUrl, formData, { headers: formData.getHeaders(), timeout: 45000 });
         const data = response.data;
         console.log("Xncly Slip API Response:", JSON.stringify(data, null, 2));
-
-        if (data && data.status === true && data.result?.amount !== undefined && data.result?.transRef !== undefined) {
+        if (data && data.status === true && data.result && data.result.amount !== undefined) {
             const slipAmount = parseFloat(data.result.amount);
-            const slipTransRef = data.result.transRef;
-
-            if (!slipTransRef) {
-                 console.warn("Xncly API returned success status but missing 'transRef'. Treating as potential error.");
-                 return { success: false, message: 'API ตอบกลับสำเร็จแต่ข้อมูล transRef ขาดหาย' };
-            }
-
-            console.log(`Xncly Slip Ref (transRef): ${slipTransRef}`);
-
-            if (verifiedSlips.includes(slipTransRef)) {
-                console.warn(`Duplicate Slip Detected: transRef ${slipTransRef} already used.`);
-                return { success: false, message: 'สลิปนี้ถูกใช้งานไปแล้ว (Ref ซ้ำ)' };
-            }
-
+            const slipReferenceId = data.result.reference_id;
+            if (slipReferenceId) {
+                console.log(`Xncly Slip Ref ID: ${slipReferenceId}`);
+                if (verifiedSlips.includes(slipReferenceId)) {
+                    console.warn(`Duplicate Slip Detected: Reference ID ${slipReferenceId} has already been used.`);
+                    return { success: false, message: 'สลิปนี้ถูกใช้งานไปแล้ว (Ref ID ซ้ำ)' };
+                }
+            } else console.warn("Xncly API did not return a reference_id for this slip. Duplicate check skipped.");
             if (isNaN(slipAmount)) {
-                console.error("Xncly API returned invalid amount.");
-                 return { success: false, message: 'ไม่สามารถอ่านจำนวนเงินจากสลิปได้ (API ผลลัพธ์ผิดพลาด)' };
+                console.error("Xncly API returned non-numeric amount:", data.result.amount);
+                return { success: false, message: 'ไม่สามารถอ่านจำนวนเงินจากสลิปที่ตรวจสอบได้' };
             }
-
-            console.log(`Xncly verification successful, Amount: ฿${slipAmount.toFixed(2)}, transRef: ${slipTransRef}`);
-
+            console.log(`Xncly verification successful, Amount: ฿${slipAmount}`);
             if (Math.abs(slipAmount - expectedAmount) < 0.01) {
-                verifiedSlips.push(slipTransRef);
-                saveVerifiedSlips();
-                console.log(`Stored verified slip transRef: ${slipTransRef}`);
-
-                return { success: true, message: `การยืนยันสลิปสำเร็จ (ยอด: ฿${slipAmount.toFixed(2)})`, confirmationData: slipTransRef };
-            } else {
-                return { success: false, message: `จำนวนเงินในสลิป (฿${slipAmount.toFixed(2)}) ไม่ตรงกับยอดที่ต้องชำระ (฿${expectedAmount.toFixed(2)})` };
-            }
+                if (slipReferenceId) {
+                    verifiedSlips.push(slipReferenceId);
+                    saveVerifiedSlips();
+                    console.log(`Stored verified slip Ref ID: ${slipReferenceId}`);
+                }
+                return { success: true, message: 'การยืนยันสำเร็จ', confirmationData: slipReferenceId || `Verified ${slipAmount.toFixed(2)} THB` };
+            } else return { success: false, message: `จำนวนเงินในสลิป (฿${slipAmount.toFixed(2)}) ไม่ตรงกับยอดที่ต้องชำระ (฿${expectedAmount.toFixed(2)})` };
         } else {
-            let errorMessage = data?.message || data?.result?.message || 'ไม่สามารถตรวจสอบสลิปได้ (API Error ไม่ทราบสาเหตุ)';
-            console.error("Xncly Slip Check Failed:", errorMessage, "| Full Response:", data);
-            if (String(errorMessage).includes("ClientID-Secret ไม่ถูกต้อง")) errorMessage = "ข้อมูล API ไม่ถูกต้อง (ตั้งค่าใน Admin)";
-            else if (String(errorMessage).includes("Package expired") || String(errorMessage).includes("Invalid quota") || String(errorMessage).includes("Quota limit") ) errorMessage = "โควต้าตรวจสอบสลิปหมด";
-            else if (String(errorMessage).includes("Invalid image") || String(errorMessage).includes("Unable read QR") || String(errorMessage).includes("file not found")) errorMessage = "รูปสลิปไม่ถูกต้อง อ่าน QR ไม่ได้ หรือไม่ใช่สลิปที่รองรับ";
-            else if (String(errorMessage).includes("Not support bank slip")) errorMessage = `สลิปจากธนาคารนี้ยังไม่รองรับ`;
-            else if (String(errorMessage).includes("Duplicate slip")) errorMessage = 'ตรวจพบสลิปซ้ำในระบบของผู้ให้บริการ API';
-            else if (data?.status === false && !errorMessage.startsWith('ไม่สามารถ')) errorMessage = `API แจ้งข้อผิดพลาด: ${errorMessage}`;
-
-            return { success: false, message: `ตรวจสอบล้มเหลว: ${errorMessage}` };
+            let errorMessage = data?.message || 'ไม่สามารถตรวจสอบสลิปได้ (ข้อผิดพลาดจาก API)';
+            console.error("Xncly Slip Check Failed:", errorMessage, data);
+            if (errorMessage.includes("ClientID-Secret ไม่ถูกต้อง")) errorMessage = "ข้อมูล API ไม่ถูกต้อง กรุณาติดต่อแอดมิน (/admin/settings)";
+            else if (errorMessage.includes("Package expired") || errorMessage.includes("Invalid quota")) errorMessage = "โควต้าตรวจสอบสลิปหมด กรุณาติดต่อแอดมิน";
+            else if (errorMessage.includes("Invalid image") || errorMessage.includes("Unable read QR")) errorMessage = "รูปสลิปไม่ถูกต้อง อ่านไม่ได้ หรือไม่ใช่สลิปธนาคารที่รองรับ";
+            else if (errorMessage.includes("Not support bank slip")) errorMessage = `สลิปจากธนาคารนี้ยังไม่รองรับโดยระบบตรวจสอบ`;
+            else if (errorMessage.includes("Duplicate slip") || errorMessage.includes("Duplicate slip in system")) errorMessage = 'ตรวจพบสลิปซ้ำในระบบของผู้ให้บริการ API นี้แล้ว';
+            return { success: false, message: `การตรวจสอบล้มเหลว: ${errorMessage}` };
         }
     } catch (error) {
         console.error('Xncly Bank Slip Verification Error:', error);
         let friendlyMessage = "เกิดข้อผิดพลาดในการตรวจสอบสลิป";
         if (axios.isAxiosError(error)) {
-            if (error.response) {
-                console.error('Xncly API Error Response Data:', error.response.data);
-                friendlyMessage = `เกิดข้อผิดพลาดจากระบบตรวจสอบ (${error.response.status}): ${error.response.data?.message || error.response.data?.error || error.response.statusText || 'Unknown API Error'}`;
-            }
-            else if (error.request) friendlyMessage = "ไม่สามารถเชื่อมต่อระบบตรวจสอบสลิปได้";
-            else friendlyMessage = `เกิดข้อผิดพลาดตั้งค่า Request: ${error.message}`;
-            if (error.code === 'ECONNABORTED' || error.message.toLowerCase().includes('timeout')) friendlyMessage = "ระบบตรวจสอบสลิปใช้เวลานานเกินไป (Timeout)";
-        } else if (error.message.includes('Download fail') || error.message.includes('Invalid image URL')) {
-             friendlyMessage = `ไม่สามารถโหลดรูปสลิปได้: ${error.message}`;
-        } else {
-             friendlyMessage += `: ${error.message || 'Unknown error'}`;
-        }
+            if (error.response) friendlyMessage = `เกิดข้อผิดพลาดจากระบบตรวจสอบสลิป: ${error.response.data?.message || error.response.statusText}`;
+            else if (error.request) friendlyMessage = error.code === 'ECONNABORTED' ? "ระบบตรวจสอบสลิปใช้เวลานานเกินไป (Timeout) กรุณาลองอีกครั้ง" : "ไม่สามารถเชื่อมต่อกับระบบตรวจสอบสลิปได้";
+            else friendlyMessage = `เกิดข้อผิดพลาดในการตั้งค่าการร้องขอ: ${error.message}`;
+        } else friendlyMessage += `: ${error.message}`;
         return { success: false, message: friendlyMessage };
-    } finally {
-        await sendTypingIndicator(sender, 'typing_off');
-    }
+    } finally { await sendTypingIndicator(sender, 'typing_off'); }
 }
+
 async function verifyRedemptionCode(code) {
     if (!code) return { success: false, message: 'ไม่ได้ระบุโค้ด' };
     console.log(`Verifying Redemption Code: ${code}`);
-    const codeIndex = validRedemptionCodes.findIndex(validCode => validCode.toUpperCase() === code.toUpperCase());
+    const codeIndex = validRedemptionCodes.findIndex(validCode => validCode === code);
     if (codeIndex !== -1) {
-        console.log(`Code ${code} is valid.`);
+        console.log(`Redemption code ${code} is valid.`);
         return { success: true, message: 'โค้ดถูกต้อง' };
     } else {
-        console.log(`Code ${code} is invalid or already used.`);
+        console.log(`Redemption code ${code} is invalid or already used.`);
         return { success: false, message: 'โค้ดไม่ถูกต้อง หรือถูกใช้ไปแล้ว' };
     }
 }
 // --- End Payment Verification ---
 
+
 // --- Order Completion and Helper Functions ---
-async function sendDeliveredItemData(sender, productName, deliveredData) {
-    await sendMessage(sender, `🎁 สินค้า: ${productName}\n🔑 ข้อมูลของคุณคือ:\n--------------------`);
-    if (deliveredData && String(deliveredData).trim()) {
-        const chunks = String(deliveredData).match(/[\s\S]{1,600}/g) || []; // Split into chunks <= 640 chars (FB limit)
-        for(const chunk of chunks) {
-            await sendMessage(sender, chunk);
-            await new Promise(resolve => setTimeout(resolve, 300)); // Small delay between chunks
+// --- (No config dependencies changed here) ---
+// --- (Copying them here for completeness, unchanged from previous logic) ---
+async function sendDeliveredItemData(sender, orderItem) {
+    await sendMessage(sender, `🎁 สินค้า: ${orderItem.name}`);
+    if (orderItem.deliveredData) {
+        if (orderItem.deliveredData.startsWith('http://') || orderItem.deliveredData.startsWith('https://')) {
+             await sendMessage(sender, `🔗 ลิงก์/ข้อมูล: ${orderItem.deliveredData}`);
+        } else {
+             await sendMessage(sender, `🔑 โค้ด/ข้อมูล:\n\`\`\`\n${orderItem.deliveredData}\n\`\`\``);
         }
     } else {
-        await sendMessage(sender, "⚠️ ไม่พบข้อมูลสำหรับสินค้านี้! กรุณาติดต่อแอดมิน");
+        await sendMessage(sender, "⚠️ ไม่พบข้อมูลสำหรับจัดส่งสินค้านี้ กรุณาติดต่อแอดมินเพื่อรับสินค้า (Error Code: DNF)");
+        console.error(`Error: Delivered data missing for order item ${orderItem.productId} for user ${sender}`);
     }
-    await sendMessage(sender, `--------------------`);
-    await new Promise(resolve => setTimeout(resolve, 500)); // Delay after sending item
+    await new Promise(resolve => setTimeout(resolve, 500));
 }
+
 async function completeOrder(sender, paymentMethod, paymentConfirmation) {
-    let orderId = `ORD-${Date.now()}-${sender.slice(-4)}`;
     try {
         const user = getUserData(sender);
         if (!user.checkoutState || !user.cart || user.cart.length === 0) {
-            console.error(`Error in completeOrder: User ${sender} has no checkout state or cart for Order ${orderId}.`);
-            await sendMessage(sender, "เกิดข้อผิดพลาด: ไม่พบข้อมูลตะกร้า/ชำระเงินของคุณ โปรดติดต่อแอดมิน");
-            if (user.checkoutState) { delete user.checkoutState; saveShopData(); }
+            console.error(`Error in completeOrder: User ${sender} has missing checkout state or empty cart.`);
+            await sendMessage(sender, "เกิดข้อผิดพลาดร้ายแรง: ไม่พบข้อมูลตะกร้าสินค้า/การชำระเงินของคุณ โปรดติดต่อแอดมิน (Error Code: CMPL_STATE)");
+            if(user.checkoutState) { delete user.checkoutState; saveShopData(); }
+            return;
+        }
+        const orderId = `ORD-${Date.now()}-${sender.slice(-4)}`;
+        const processedOrderItems = [];
+        let stockUpdateError = false;
+        let stockErrorDetails = "";
+        let totalAmountFromCart = 0; // Recalculate here for safety
+
+        // --- CRITICAL SECTION ---
+        for (const cartItem of user.cart) {
+            const productIndex = shopData.products.findIndex(p => p.id === cartItem.productId);
+            if (productIndex === -1) {
+                stockUpdateError = true; stockErrorDetails = `ไม่พบสินค้า ID ${cartItem.productId} ในระบบ`; break;
+            }
+            const product = shopData.products[productIndex];
+            if (!product.downloadUrls || product.downloadUrls.length === 0) {
+                 stockUpdateError = true; stockErrorDetails = `สินค้า ${product.name} หมดสต็อกก่อนการตัดสต็อก`; break;
+            }
+            const deliveredData = product.downloadUrls.shift();
+            processedOrderItems.push({
+                productId: cartItem.productId, name: cartItem.name, price: cartItem.price, deliveredData: deliveredData
+            });
+            product.updatedAt = new Date().toISOString();
+             totalAmountFromCart += cartItem.price; // Recalculate total
+            console.log(`Order ${orderId}: Dispensed item for ${product.name}. Remaining: ${product.downloadUrls.length}`);
+        }
+        // --- END CRITICAL SECTION ---
+
+        if (stockUpdateError) {
+            console.error(`Order ${orderId} failed due to stock issue: ${stockErrorDetails}`);
+            await sendMessage(sender, `❌ ขออภัย เกิดข้อผิดพลาดร้ายแรงระหว่างการตัดสต็อก: ${stockErrorDetails}. การสั่งซื้อยังไม่สมบูรณ์ กรุณาติดต่อแอดมิน (Error Code: CMPL_STOCK)`);
+            // Don't save stock changes if error occurred mid-loop
+            // Reset checkout state only
+             delete user.checkoutState;
+             saveShopData(); // Save only the reset state
             return;
         }
 
-
-        const orderItemsDeepCopy = JSON.parse(JSON.stringify(user.cart));
-        const originalTotalAmount = user.checkoutState.originalTotalAmount || 0;
-        const discountCodeApplied = user.checkoutState.discountCode || null;
-        const discountAmountValue = user.checkoutState.discountAmount || 0;
-        const wasAutoPromo = user.checkoutState.autoDiscountApplied === true;
-        let deliveredItemsData = []; // Stores { productId, name, deliveredData: [item1, item2...] }
-
-        let stockConsumptionError = false;
-        let insufficientStockProducts = [];
-        // --- Critical Section: Consume Stock ---
-        for (const item of orderItemsDeepCopy) {
-            const productIndex = shopData.products.findIndex(p => p.id === item.productId);
-            if (productIndex === -1) {
-                console.error(`FATAL: Product ${item.productId} (Name: ${item.name}) not found during order completion for ${sender} (Order ${orderId}).`);
-                stockConsumptionError = true;
-                insufficientStockProducts.push(`${item.name} (ไม่พบสินค้า!)`);
-                continue; // Skip to next item if product not found
-            }
-            const product = shopData.products[productIndex];
-            // Ensure stockItems is an array, initialize if not (data safety)
-            if (!Array.isArray(product.stockItems)) {
-                console.warn(`Product ${product.id} (${product.name}) stockItems was not an array. Initializing. Order ${orderId}.`);
-                product.stockItems = [];
-            }
-
-            if (product.stockItems.length < item.quantity) {
-                console.error(`FATAL: Insufficient stock for ${product.name} (ID: ${product.id}). Needed ${item.quantity}, Have ${product.stockItems.length}. Order ${orderId} for ${sender}.`);
-                stockConsumptionError = true;
-                insufficientStockProducts.push(`${product.name} (มี ${product.stockItems.length} / ต้องการ ${item.quantity})`);
-                continue; // Skip to next item if insufficient stock
-            }
-
-            const itemsForThisProduct = [];
-            for (let i = 0; i < item.quantity; i++) {
-                // Use shift() to remove and get the first item (FIFO-like consumption)
-                const consumedItem = product.stockItems.shift();
-                // IMPORTANT: Check if consumedItem is valid data
-                if (consumedItem === undefined || consumedItem === null || String(consumedItem).trim() === '') {
-                    console.error(`FATAL: Consumed invalid stock item (undefined/null/empty) for ${product.name} (Index ${i}) for order ${orderId}. Stock data potentially corrupt.`);
-                    // Should we put the item back? Or halt completely? Halting seems safer.
-                    stockConsumptionError = true;
-                    insufficientStockProducts.push(`${product.name} (ข้อมูลสต็อกผิดพลาด)`);
-                    // Restore previously shifted items for THIS product if error occurs mid-loop? Complex. Halting is better.
-                    itemsForThisProduct.length = 0; // Clear partially collected items for this product on error
-                    break; // Break inner loop for this product
-                }
-                itemsForThisProduct.push(consumedItem);
-            }
-             // Only add to delivered data if NO error occurred for this product's loop
-             if (!stockConsumptionError || itemsForThisProduct.length === item.quantity) { // Ensure all items were collected successfully
-                 deliveredItemsData.push({
-                    productId: item.productId,
-                    name: item.name,
-                    deliveredData: itemsForThisProduct // Store the actual consumed data
-                 });
-                 // Update stock count immediately after successful consumption for this product
-                 product.stock = product.stockItems.length;
-                 product.updatedAt = new Date().toISOString(); // Mark update time
-                 console.log(`Consumed ${itemsForThisProduct.length} stock items for ${product.name} (Order ${orderId}). Remaining: ${product.stock}`);
-             } else {
-                 console.log(`Partially consumed items for ${product.name} will not be added to delivered data due to error.`);
-             }
-
-             if (stockConsumptionError) break; // Break outer loop if any error occurred
-        }
-        // --- End Critical Section ---
-
-        // If any stock consumption error occurred, STOP before creating order/saving data
-        if (stockConsumptionError) {
-            console.error(`Order ${orderId} for ${sender} halted due to stock/product error(s): ${insufficientStockProducts.join(', ')}`);
-            // **Crucially, DO NOT saveShopData() here**, as stock might be partially consumed but order not created.
-            // Inform the user and potentially admin.
-            await sendMessage(sender, `❌ เกิดข้อผิดพลาดร้ายแรงในการตัดสต็อกสินค้า!\n- ${insufficientStockProducts.join('\n- ')}\nคำสั่งซื้อของคุณยังไม่สำเร็จ โปรดติดต่อแอดมินทันทีพร้อมแจ้งปัญหา (รหัส ${orderId})`);
-            // Do NOT clear checkout state here, user might need info or admin needs to intervene.
-            return; // Stop order completion
-        }
-
-        console.log(`Stock consumption successful for Order ${orderId}`);
-
-        // --- Update Discount Code Usage (if applicable) ---
-        let discountUpdateError = false;
-        if (discountCodeApplied && !wasAutoPromo) {
-            const codeIndex = discountCodes.findIndex(dc => dc.code === discountCodeApplied);
-            if (codeIndex !== -1) {
-                discountCodes[codeIndex].uses = (discountCodes[codeIndex].uses || 0) + 1;
-                console.log(`Incremented usage count for discount code ${discountCodeApplied} (Order ${orderId}). New count: ${discountCodes[codeIndex].uses}`);
-                try {
-                    saveDiscountCodes(); // Save discount usage *separately* first
-                } catch (err) {
-                     console.error(`CRITICAL ERROR: Failed to save discount code usage update for ${discountCodeApplied} (Order ${orderId}):`, err);
-                     discountUpdateError = true; // Flag error but continue order
-                     // Inform user non-critically
-                     await sendMessage(sender, "⚠️ เกิดปัญหาในการบันทึกการใช้ส่วนลดเล็กน้อย (แจ้งแอดมินได้หากต้องการ) แต่คำสั่งซื้อของคุณกำลังดำเนินการต่อ...");
-                }
-            } else {
-                console.warn(`Could not find manual discount code ${discountCodeApplied} to increment usage for order ${orderId}. State inconsistency?`);
-            }
-        }
-
-        // --- Create Order Record ---
         const newOrder = {
-            id: orderId,
-            userId: sender,
-            items: orderItemsDeepCopy.map(item => ({ // Use the original cart structure for the order record
-                productId: item.productId,
-                name: item.name,
-                price: item.price,
-                quantity: item.quantity
-            })),
-            originalTotalAmount: originalTotalAmount,
-            discountCode: discountCodeApplied,
-            discountAmount: discountAmountValue,
-            finalAmount: user.checkoutState.finalAmount,
-            paymentMethod: paymentMethod,
-            paymentStatus: 'paid', // Assume paid since verification passed
-            paymentConfirmation: String(paymentConfirmation).substring(0, 500), // Store confirmation (link/ref/code), limit length
-            status: 'completed', // Initial status
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-            // Intentionally NOT storing the delivered stockItems data in the order record itself for brevity/security
+            id: orderId, userId: sender, items: processedOrderItems,
+            totalAmount: totalAmountFromCart, // Use recalculated amount
+            paymentMethod: paymentMethod, paymentStatus: 'paid',
+            paymentConfirmation: paymentConfirmation, status: 'completed',
+            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
         };
-
         shopData.orders.push(newOrder);
-        user.cart = []; // Clear user cart
-        delete user.checkoutState; // Clear checkout state
-        saveShopData(); // Save ALL data (stock updates, order, user state) AT THE END
+        user.cart = [];
+        delete user.checkoutState;
+        saveShopData(); // Save product stock updates, new order, user state
+        console.log(`Order ${orderId} completed successfully for user ${sender}. Payment: ${paymentMethod}. Items: ${processedOrderItems.length}`);
 
-        console.log(`Order ${orderId} completed for user ${sender}. Payment: ${paymentMethod}. Discount: ${discountCodeApplied || 'None'}. Items: ${deliveredItemsData.map(i => i.name + 'x' + i.deliveredData.length).join(', ')}`);
-
-        // --- Send Confirmation and Delivered Items to User ---
-        await sendMessage(sender, `🎉 ขอบคุณสำหรับการสั่งซื้อ!\nรหัสคำสั่งซื้อ: ${orderId}`);
+        await sendMessage(sender, `🎉 ขอบคุณสำหรับการสั่งซื้อ!\nรหัสคำสั่งซื้อของคุณ: ${orderId}`);
         await sendMessage(sender, "✅ การชำระเงิน/ยืนยันโค้ดเรียบร้อย");
-        if (discountAmountValue > 0) {
-            const discountSource = wasAutoPromo ? `โปรโมชั่นอัตโนมัติ` : `โค้ด ${discountCodeApplied}`;
-             await sendMessage(sender, `🏷️ ใช้ส่วนลด ${discountSource} ${discountAmountValue.toFixed(2)} บาท`);
-        }
-        await sendMessage(sender, "🚚 กำลังจัดส่งสินค้า...");
+        await sendMessage(sender, "🚚 กำลังจัดส่งสินค้าดิจิทัลของคุณ...");
         await sendTypingIndicator(sender);
-
-        // Iterate through the collected delivered data and send it
-        for (const deliveredItem of deliveredItemsData) {
-             const combinedData = deliveredItem.deliveredData.join('\n'); // Join multiple items of the same product with newlines
-             await sendDeliveredItemData(sender, deliveredItem.name, combinedData);
+        for (const item of newOrder.items) {
+            await sendDeliveredItemData(sender, item);
         }
-
         await sendTypingIndicator(sender, 'typing_off');
-        await sendMessage(sender, "✨ การจัดส่งเสร็จสมบูรณ์! หากมีปัญหา กรุณาติดต่อแอดมินพร้อมแจ้งรหัสคำสั่งซื้อ");
+        await sendMessage(sender, "✨ การจัดส่งเสร็จสมบูรณ์! หากมีปัญหา หรือไม่ได้รับสินค้า กรุณาติดต่อแอดมินพร้อมแจ้งรหัสคำสั่งซื้อ");
         await sendButtonTemplate(sender, "เลือกดูสินค้าอื่นๆ หรือติดต่อสอบถาม", [
             { type: "postback", title: "เลือกหมวดหมู่อื่น", payload: "SHOW_CATEGORIES" },
-            { type: "web_url", title: "💬 ติดต่อแอดมิน", url: loadedConfig.adminContactLink || '#' }
+            { type: "web_url", title: "💬 ติดต่อแอดมิน", url: "https://m.me/61555184860915" }
         ]);
-
     } catch (error) {
-        console.error(`Error in completeOrder for user ${sender} (Order ${orderId || 'N/A'}): ${error.message}`, error.stack);
-        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดร้ายแรงในขั้นตอนสุดท้าย โปรดติดต่อแอดมินพร้อมแจ้งรหัสผู้ใช้ (PSID) และรหัสคำสั่งซื้อ (หากมี) เพื่อตรวจสอบ");
-        // Clean up user state on error during completion, if possible
+        console.error(`Critical Error in completeOrder for user ${sender}: ${error.message}`, error.stack);
+        await sendMessage(sender, "❌ ขออภัย เกิดข้อผิดพลาดร้ายแรงที่ไม่คาดคิดในขั้นตอนสุดท้ายของการสั่งซื้อ กรุณาติดต่อแอดมินพร้อมแจ้งรหัสผู้ใช้ (PSID) ของคุณเพื่อตรวจสอบ (Error Code: CMPL_FATAL)");
         const user = getUserData(sender);
-        if (user.checkoutState) { delete user.checkoutState; saveShopData(); }
+        if (user.checkoutState) { delete user.checkoutState; }
+        saveShopData();
     }
 }
+
 async function cancelPayment(sender) {
     try {
         const user = getUserData(sender);
@@ -1596,16 +1074,11 @@ async function cancelPayment(sender) {
             const prevState = user.checkoutState.step;
             delete user.checkoutState;
             saveShopData();
-            await sendMessage(sender, "✅ ยกเลิกขั้นตอนการชำระเงิน/ใช้โค้ด/ส่วนลดแล้ว");
-            console.log(`User ${sender} cancelled checkout process from state: ${prevState}`);
-            // Show cart if not empty, otherwise show categories
-            if (user.cart && user.cart.length > 0) {
-                 await viewCart(sender);
-             } else {
-                 await showCategories(sender);
-             }
+            await sendMessage(sender, "✅ ยกเลิกขั้นตอนการชำระเงิน/ใช้โค้ดเรียบร้อยแล้ว");
+            if (prevState && prevState !== 'select_method') await viewCart(sender);
+            else await showCategories(sender);
         } else {
-            await sendMessage(sender, "ไม่ได้อยู่ในขั้นตอนการชำระเงิน หรือใช้โค้ด/ส่วนลด");
+            await sendMessage(sender, "ไม่ได้อยู่ในขั้นตอนการชำระเงิน หรือใช้โค้ด");
         }
     } catch (error) {
         console.error(`Error in cancelPayment: ${error.message}`);
@@ -1614,1725 +1087,830 @@ async function cancelPayment(sender) {
 }
 // --- End Order Completion ---
 
+
 // --- Search, Featured Products, Help Functions ---
+// --- (No config dependencies changed here) ---
+// --- (Copying them here for completeness, unchanged from previous logic) ---
 async function searchProducts(sender, searchTerm) {
     try {
-        if (!searchTerm || searchTerm.trim().length < 2) return await sendMessage(sender, "กรุณาระบุคำค้นหาอย่างน้อย 2 ตัวอักษร");
+        if (!searchTerm || searchTerm.trim().length < 2) {
+            await sendMessage(sender, "กรุณาระบุคำค้นหาอย่างน้อย 2 ตัวอักษร"); return;
+        }
         const searchTermLower = searchTerm.toLowerCase().trim();
-        const results = shopData.products.filter(product => {
-            product.stock = Array.isArray(product.stockItems) ? product.stockItems.length : 0; // Refresh stock for check
-            return (
-                product.stock > 0 && // Only search available products
-                (
-                    product.name.toLowerCase().includes(searchTermLower) ||
-                    (product.description && product.description.toLowerCase().includes(searchTermLower)) ||
-                    (product.language && product.language.toLowerCase().includes(searchTermLower)) ||
-                    (product.category && product.category.toLowerCase().includes(searchTermLower)) ||
-                    product.id === searchTerm // Allow searching by full ID
-                )
-            );
-        });
-
+        const results = shopData.products.filter(product =>
+            (product.name.toLowerCase().includes(searchTermLower) ||
+             (product.description && product.description.toLowerCase().includes(searchTermLower)) ||
+             (product.language && product.language.toLowerCase().includes(searchTermLower)) ||
+             (product.category && product.category.toLowerCase().includes(searchTermLower)) ||
+              product.id === searchTerm)
+        );
         if (results.length === 0) {
-            await sendMessage(sender, `⚠️ ไม่พบสินค้าที่ตรงกับ "${searchTerm}" (หรือสินค้าหมดสต็อก)`);
-            await sendButtonTemplate(sender, "ลองค้นหาใหม่ หรือดูหมวดหมู่", [
-                 { type: "postback", title: "ดูหมวดหมู่", payload: "SHOW_CATEGORIES" }
-            ]);
-            return;
+            await sendMessage(sender, `⚠️ ไม่พบสินค้าที่ตรงกับคำค้นหา "${searchTerm}"`);
+            await sendButtonTemplate(sender,"ลองค้นหาใหม่ หรือดูหมวดหมู่ทั้งหมด",[{ type: "postback", title: "ดูหมวดหมู่", payload: "SHOW_CATEGORIES" }]); return;
         }
-
         await sendMessage(sender, `🔎 ผลการค้นหาสำหรับ "${searchTerm}" (${results.length} รายการ):`);
-        const elements = results.slice(0, 10).map(product => ({ // Limit to 10 results (FB template limit)
-            title: product.name,
-            subtitle: `฿${product.price.toFixed(2)} | ${product.category} | เหลือ ${product.stock}`,
-            image_url: product.imageUrl || "https://via.placeholder.com/300x200/EEE/777?text=Result",
-            buttons: [
-                { type: "postback", title: "ดูรายละเอียด", payload: `PRODUCT_VIEW_${product.id}` },
-                { type: "postback", title: "➕ หยิบใส่ตะกร้า", payload: `PRODUCT_ADD_TO_CART_${product.id}` }
-            ]
-        }));
+        const elements = results.slice(0, 10).map(product => {
+             const stockCount = product.downloadUrls?.length || 0;
+             return {
+                title: product.name + (stockCount <= 0 ? ' (หมด)' : ''),
+                subtitle: `฿${product.price} | ${product.category} | เหลือ ${stockCount}`,
+                image_url: product.imageUrl || "https://via.placeholder.com/300x200?text=Result",
+                buttons: [
+                    { type: "postback", title: "ดูรายละเอียด", payload: `PRODUCT_VIEW_${product.id}` },
+                    ...(stockCount > 0 ? [{ type: "postback", title: "➕ หยิบใส่ตะกร้า (1 ชิ้น)", payload: `PRODUCT_ADD_TO_CART_${product.id}` }] : [])
+                ]
+             };
+        });
         await sendGenericTemplate(sender, elements);
-
-        if (results.length > 10) {
-            await sendMessage(sender, `แสดงผล 10 รายการแรก หากไม่พบสินค้าที่ต้องการ กรุณาระบุคำค้นหาให้เจาะจงขึ้น`);
-        }
-
         await sendButtonTemplate(sender, "ดำเนินการต่อ:", [
             { type: "postback", title: "ดูหมวดหมู่ทั้งหมด", payload: "SHOW_CATEGORIES" },
             { type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" }
         ]);
-    } catch (error) {
-        console.error(`Error in searchProducts: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการค้นหา");
-    }
+    } catch (error) { console.error(`Error in searchProducts: ${error.message}`); await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการค้นหาสินค้า"); }
 }
+
 async function showFeaturedProducts(sender) {
     try {
-        // Refresh stock count before filtering/sorting
-        shopData.products.forEach(p => {
-            p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0;
-        });
-
         const featuredProducts = shopData.products
-            .filter(p => p.stock > 0) // Only show in-stock products
-            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)) // Sort by newest first
-            .slice(0, 5); // Limit to 5 featured products
-
+            .filter(p => p.downloadUrls?.length > 0)
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+            .slice(0, 5);
         if (featuredProducts.length === 0) {
-            await sendMessage(sender, "ตอนนี้ยังไม่มีสินค้าแนะนำพิเศษ หรือสินค้าหมดชั่วคราว");
-            await showCategories(sender); // Fallback to categories if no featured products
-            return;
+            await sendMessage(sender, "ตอนนี้ยังไม่มีสินค้าแนะนำพิเศษ ลองดูหมวดหมู่ทั้งหมดก่อนนะครับ");
+            await showCategories(sender); return;
         }
-
         await sendMessage(sender, "🌟 สินค้าแนะนำ / มาใหม่ 🌟");
-        const elements = featuredProducts.map(product => ({
-            title: product.name,
-            subtitle: `฿${product.price.toFixed(2)} | ${product.category} | เหลือ ${product.stock}`,
-            image_url: product.imageUrl || "https://via.placeholder.com/300x200/EEE/777?text=Featured",
-            buttons: [
-                { type: "postback", title: "ดูรายละเอียด", payload: `PRODUCT_VIEW_${product.id}` },
-                { type: "postback", title: "➕ หยิบใส่ตะกร้า", payload: `PRODUCT_ADD_TO_CART_${product.id}` }
-            ]
-        }));
+        const elements = featuredProducts.map(product => {
+             const stockCount = product.downloadUrls.length;
+             return {
+                 title: product.name, subtitle: `฿${product.price} | ${product.category} | เหลือ ${stockCount}`,
+                 image_url: product.imageUrl || "https://via.placeholder.com/300x200?text=Featured",
+                 buttons: [
+                     { type: "postback", title: "ดูรายละเอียด", payload: `PRODUCT_VIEW_${product.id}` },
+                     { type: "postback", title: "➕ หยิบใส่ตะกร้า (1 ชิ้น)", payload: `PRODUCT_ADD_TO_CART_${product.id}` }
+                 ]
+             };
+        });
         await sendGenericTemplate(sender, elements);
-
         await sendButtonTemplate(sender, "ดำเนินการต่อ:", [
             { type: "postback", title: "ดูหมวดหมู่ทั้งหมด", payload: "SHOW_CATEGORIES" },
             { type: "postback", title: "🛒 ดูตะกร้า", payload: "CART_VIEW" }
         ]);
-    } catch (error) {
-        console.error(`Error in showFeaturedProducts: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงสินค้าแนะนำ");
-    }
+    } catch (error) { console.error(`Error in showFeaturedProducts: ${error.message}`); await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงสินค้าแนะนำ"); }
 }
+
 async function showHelp(sender) {
     try {
-        let helpText = `
+        const helpText = `
 🤖 คำสั่งช่วยเหลือ & ข้อมูล 🤖
 
 🔹 **คำสั่งพื้นฐาน (พิมพ์ได้เลย):**
-   - สินค้า / shop : แสดงหมวดหมู่
-   - ตะกร้า / cart : ดูตะกร้า
-   - ชำระเงิน / checkout : ไปยังหน้าชำระเงิน/ใช้โค้ด/ส่วนลด
-   - แนะนำ / featured : ดูสินค้าแนะนำ
-   - ค้นหา [คำ] : ค้นหาสินค้า (เช่น ค้นหา script)
-   - ล้างตะกร้า : ลบสินค้าในตะกร้า
-   - ยกเลิก : ยกเลิกขั้นตอนที่กำลังทำอยู่ (เช่น ชำระเงิน, กรอกโค้ด)
+   - สินค้า / shop : แสดงหมวดหมู่สินค้า
+   - ตะกร้า / cart : ดูสินค้าในตะกร้า
+   - ชำระเงิน / checkout : ไปยังหน้าชำระเงิน/ใช้โค้ด
+   - แนะนำ / featured : ดูสินค้าแนะนำ/มาใหม่
+   - ค้นหา [คำ] : ค้นหาสินค้า (เช่น: ค้นหา script bot)
+   - ล้างตะกร้า : ลบสินค้าทั้งหมดในตะกร้า
+   - ยกเลิก : ยกเลิกขั้นตอนการชำระเงิน/ใช้โค้ด
    - ช่วยเหลือ / help : แสดงข้อความนี้
 
-🔹 **การซื้อสินค้า:**
-   1. เลือกหมวดหมู่ -> ดูสินค้า -> ดูรายละเอียด
-   2. กด 'หยิบใส่ตะกร้า' (เพิ่มจำนวนได้หากกดซ้ำ)
-   3. กด 'ดูตะกร้า' หรือ 'ชำระเงิน'
+🔹 **การจัดการตะกร้า:**
+   - ในหน้าตะกร้า จะมีปุ่ม Quick Reply สำหรับลบสินค้าทีละชิ้น
 
-🔹 **การชำระเงิน/รับของ/ส่วนลด:**
-   1. กด 'ชำระเงิน' จากตะกร้า
-   2. ระบบจะตรวจสอบ **โปรโมชั่นอัตโนมัติ** (ถ้ามีและเข้าเงื่อนไข)
-   3. หากไม่มีโปรฯ อัตโนมัติ: ระบบจะถามหา **โค้ดส่วนลด** (ถ้ามีให้พิมพ์ / ไม่มีให้กดข้าม)
-   4. เลือกวิธีชำระ:
-      - โอนเงิน: ส่ง 'รูปสลิป' ที่ถูกต้องและยังไม่เคยใช้ (ระบบตรวจสอบอัตโนมัติ)
-      - Wallet: สร้างซองตามยอด แล้วส่ง 'ลิงก์ซองอั่งเปา' (ระบบจะกดรับซองเพื่อยืนยัน)
-      - ใช้โค้ด: ส่ง 'โค้ดรับของ 32 หลัก'
-   5. ระบบจะส่งสินค้าให้เมื่อตรวจสอบการชำระเงิน/โค้ดสำเร็จ
-
-🔹 **AI Chat (หากเปิดใช้งาน):**
-   - พิมพ์คำถามทั่วไป ระบบ AI อาจช่วยตอบได้
-   - หาก AI ตอบไม่ได้ หรือต้องการคุยกับคน กดปุ่มติดต่อแอดมิน
+🔹 **การชำระเงิน/รับของ:**
+   1. กด 'ชำระเงิน'
+   2. เลือกวิธี:
+      - โอนเงิน: ทำตามขั้นตอน ส่งสลิป
+      - Wallet: ทำตามขั้นตอน ส่งลิงก์ซองอั่งเปา
+      - ใช้โค้ด: กรอกโค้ด 32 หลัก ที่ได้รับ
+   3. หลังชำระเงิน/ยืนยันโค้ดสำเร็จ ระบบจะส่งโค้ด/ลิงก์สินค้าให้ทางแชทนี้
 
 ติดปัญหา หรือ ต้องการสอบถามเพิ่มเติม? 👇
         `;
         await sendMessage(sender, helpText);
         await sendButtonTemplate(sender, "ติดต่อแอดมิน หรือ กลับไปดูสินค้า:", [
-            { type: "web_url", title: "💬 ติดต่อแอดมิน", url: loadedConfig.adminContactLink || '#' },
+            { type: "web_url", title: "💬 ติดต่อแอดมิน (Facebook)", url: "https://m.me/61555184860915" },
             { type: "postback", title: "กลับไปดูสินค้า", payload: "SHOW_CATEGORIES" }
         ]);
-    } catch (error) {
-        console.error(`Error in showHelp: ${error.message}`);
-        await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงคำแนะนำ");
-    }
+    } catch (error) { console.error(`Error in showHelp: ${error.message}`); await sendMessage(sender, "ขออภัย เกิดข้อผิดพลาดในการแสดงคำแนะนำ"); }
 }
 // --- End Search/Help ---
 
 
-// --- Facebook Webhook Handling ---
+// --- Facebook Webhook Handling (GET/POST - Using runtimeConfig) ---
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-
-    console.log("Webhook Verification Attempt:");
-    console.log("Mode:", mode);
-    console.log("Token Received:", token);
-    console.log("Expected Token:", loadedConfig.fbVerifyToken);
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === loadedConfig.fbVerifyToken) {
-            console.log('Webhook Verified Successfully!');
-            res.status(200).send(challenge);
-        } else {
-            console.error('Webhook Verification Failed: Mode or Token mismatch.');
-            if (!loadedConfig.fbVerifyToken || loadedConfig.fbVerifyToken === DEFAULT_CONFIG.fbVerifyToken) {
-                console.error("----> Suggestion: 'Facebook Verify Token' is missing or using default in /admin/settings. Please set a strong, unique token and ensure it matches the one in your Facebook App's Webhook setup. <----");
-            } else if (token !== loadedConfig.fbVerifyToken) {
-                 console.error("----> Suggestion: The token received from Facebook does NOT match the 'Facebook Verify Token' configured in /admin/settings. Check both values. <----");
-            }
-            res.sendStatus(403);
-        }
+    // Use verifyToken from runtimeConfig
+    if (mode && token && mode === 'subscribe' && token === runtimeConfig.verifyToken) {
+        console.log('Webhook Verified');
+        res.status(200).send(challenge);
     } else {
-        console.error("Webhook Verification Failed: Missing 'hub.mode' or 'hub.verify_token' in query parameters.");
-        res.sendStatus(400);
+        console.error('Webhook Verification Failed. Mode:', mode, 'Received Token:', token, 'Expected Token:', runtimeConfig.verifyToken);
+        res.sendStatus(403);
     }
 });
+
 app.post('/webhook', async (req, res) => {
     const body = req.body;
-
-    if (!loadedConfig.fbPageAccessToken) {
-        console.error("Webhook Error: Facebook Page Access Token not configured in /admin/settings. Cannot process incoming messages.");
-        return res.status(200).send('EVENT_RECEIVED_BUT_NO_TOKEN');
-    }
-
     if (body.object === 'page') {
-        // Send 200 OK immediately to Facebook
-        res.status(200).send('EVENT_RECEIVED');
-
-        // Process events asynchronously
-        const processEntry = async (entry) => {
-            if (!entry.messaging || !Array.isArray(entry.messaging)) return;
-            for (const webhook_event of entry.messaging) {
-                if (!webhook_event || !webhook_event.sender || !webhook_event.sender.id) continue;
+        if (!body.entry || !Array.isArray(body.entry)) {
+            console.error("Invalid webhook payload: Missing or invalid 'entry' array.");
+            return res.sendStatus(400); // Bad Request
+        }
+        // Process entries concurrently but wait for all before responding
+        Promise.all(body.entry.map(async (entry) => {
+            if (!entry.messaging || !Array.isArray(entry.messaging)) { return; } // Skip invalid entries silently
+            for (const webhook_event of entry.messaging) { // Process all events in the array
+                if (!webhook_event || !webhook_event.sender || !webhook_event.sender.id) { continue; } // Skip invalid events
                 const sender_psid = webhook_event.sender.id;
-
-                // Ignore echoes from the bot itself
-                if (webhook_event.message?.is_echo) {
-                    // console.log(`Ignoring echo for ${sender_psid}`);
-                    continue;
-                }
-
-                console.log(`--- Event --- Sender PSID: ${sender_psid}`);
-
+                console.log(`--- Event --- Sender PSID: ${sender_psid}, Type: ${webhook_event.message ? 'message' : (webhook_event.postback ? 'postback' : 'other')}`);
                 try {
-                    // Optional: Mark message as seen (can be rate limited)
-                    // await sendApiRequest({ url: 'https://graph.facebook.com/v19.0/me/messages', method: 'POST', json: { recipient: { id: sender_psid }, sender_action: 'mark_seen' } });
-
-                    // Determine event type and handle
                     if (webhook_event.message) {
                         await handleMessage(sender_psid, webhook_event.message);
                     } else if (webhook_event.postback) {
                         await handlePostback(sender_psid, webhook_event.postback);
-                    } else if (webhook_event.read) {
-                        // console.log(`Message read event for ${sender_psid}`);
-                        // Optional: Handle read receipts if needed
-                    } else if (webhook_event.delivery) {
-                        // console.log(`Message delivery event for ${sender_psid}`);
-                        // Optional: Handle delivery confirmations if needed
-                    } else {
-                         console.log(`Webhook received unknown event type for ${sender_psid}:`, webhook_event);
                     }
+                    // Ignore delivery/read/optin/etc. for now
                 } catch (error) {
-                    console.error(`Error processing event for ${sender_psid}:`, error);
-                    // Avoid spamming logs for users who blocked the bot
-                    if (!(error?.error === 'USER_BLOCKED_OR_RESTRICTED' || (error.message && error.message.includes('USER_BLOCKED_OR_RESTRICTED')))) {
-                        // Log other potentially recoverable errors more verbosely if needed
-                    }
+                    console.error(`Error processing webhook event for ${sender_psid}:`, error);
+                    // Maybe send a generic error message to the user? Be careful not to spam.
+                    // await sendMessage(sender_psid, "ขออภัย เกิดข้อผิดพลาดบางอย่าง โปรดลองอีกครั้งในภายหลัง");
                 }
             }
-        };
-
-        // Process entries sequentially to maintain order if necessary, though FB usually sends one entry/batch
-        try {
-            for (const entry of body.entry) {
-                 await processEntry(entry);
-            }
-        } catch (batchError) {
-             console.error("Error during sequential processing of webhook entries:", batchError);
-        }
-
+        })).then(() => {
+            res.status(200).send('EVENT_RECEIVED');
+        }).catch(err => {
+            console.error("Error processing webhook batch:", err);
+            res.status(500).send('INTERNAL_SERVER_ERROR'); // Internal Server Error
+        });
     } else {
-        // Not a page event
-        console.log("Webhook received non-page object:", body.object);
-        res.sendStatus(404);
+        // Not a page subscription event
+        res.sendStatus(404); // Not Found
     }
 });
 // --- End Webhook ---
 
+
 // --- Message and Postback Handlers ---
+// --- (No config dependencies changed here) ---
+// --- (Copying them here for completeness, unchanged from previous logic) ---
 async function handleMessage(sender_psid, received_message) {
-    console.log(`Handling message from ${sender_psid}: Type=${received_message.attachments?.[0]?.type || 'text'}, Text='${String(received_message.text || '').substring(0, 50)}...'`);
+    console.log(`Handling message from ${sender_psid}:`, JSON.stringify(received_message).substring(0, 150) + '...');
     const user = getUserData(sender_psid);
 
-    // --- Priority 1: Handle specific inputs during CHECKOUT ---
+    // 1. Prioritize Checkout Inputs
     if (user.checkoutState) {
-        let handledInCheckout = false;
-        const currentState = user.checkoutState.step;
-
-        // Always allow cancellation during checkout
-        if (received_message.text && ['ยกเลิก', 'cancel'].includes(received_message.text.trim().toLowerCase())) {
-            await cancelPayment(sender_psid);
-            return; // Stop further processing
-        }
-
-        // Handle text input based on checkout step
         if (received_message.text) {
-            handledInCheckout = await handleCheckoutTextInput(sender_psid, received_message.text);
+            const handledInCheckout = await handleCheckoutTextInput(sender_psid, received_message.text);
+            if (handledInCheckout) return;
         }
-        // Handle image input for bank slip
-        else if (currentState === 'awaiting_bank_slip' && received_message.attachments?.[0]?.type === 'image' && received_message.attachments[0].payload?.url) {
-            handledInCheckout = await handleCheckoutImageInput(sender_psid, received_message.attachments[0].payload.url);
+        else if (received_message.attachments?.length > 0 && received_message.attachments[0].type === 'image' && received_message.attachments[0].payload?.url) {
+            const handledAsSlip = await handleCheckoutImageInput(sender_psid, received_message.attachments[0].payload.url);
+            if (handledAsSlip) return;
         }
-        // Handle potential Angpao link from fallback attachment (e.g., link share)
-        else if (currentState === 'awaiting_angpao_link' && received_message.attachments?.[0]?.type === 'fallback' && received_message.attachments[0].payload?.url) {
-            const fallbackUrl = received_message.attachments[0].payload.url;
-            const ANGPAO_REGEX = /https:\/\/gift\.truemoney\.com\/campaign\/\?v=([a-zA-Z0-9]{35})/;
-            if (ANGPAO_REGEX.test(fallbackUrl)) {
-                console.log('Angpao link detected from fallback attachment');
-                handledInCheckout = await handleCheckoutTextInput(sender_psid, fallbackUrl);
-            }
+        else if (received_message.attachments?.length > 0 && received_message.attachments[0].type === 'fallback' && received_message.attachments[0].payload?.url) {
+             const fallbackUrl = received_message.attachments[0].payload.url;
+             const ANGPAO_REGEX = /https:\/\/gift\.truemoney\.com\/campaign\/\?v=([a-zA-Z0-9]{35})/;
+             if (ANGPAO_REGEX.test(fallbackUrl)) { // Check if it's an Angpao link
+                 const handledInCheckout = await handleCheckoutTextInput(sender_psid, fallbackUrl);
+                 if (handledInCheckout) return;
+             } else { // If it's fallback but not angpao link, prompt user based on state
+                if(user.checkoutState.step === 'awaiting_angpao_link') await sendMessage(sender_psid, "กรุณาส่งลิงก์ซองอั่งเปาที่ถูกต้อง หรือกด 'ยกเลิก'");
+                else if(user.checkoutState.step === 'awaiting_bank_slip') await sendMessage(sender_psid, "กรุณาส่งรูปสลิป หรือกด 'ยกเลิก'");
+                else if(user.checkoutState.step === 'awaiting_redeem_code') await sendMessage(sender_psid, "กรุณาส่งโค้ด 32 หลัก หรือกด 'ยกเลิก'");
+                return;
+             }
         }
-
-        // If checkout logic handled the input (even if it was invalid for the step), stop here.
-        if (handledInCheckout) {
-            console.log(`Message handled by checkout logic for step: ${currentState}`);
-            return;
-        }
-        // If input received during checkout but NOT handled by specific step logic, remind user.
-        else if (received_message.text || received_message.attachments) {
-             console.log(`User ${sender_psid} sent unhandled input during checkout step: ${currentState}`);
-             let reminderMsg = "กรุณาดำเนินการตามขั้นตอนปัจจุบัน หรือพิมพ์ 'ยกเลิก' เพื่อออก";
-             if (currentState === 'awaiting_discount_code') reminderMsg = "กรุณาส่ง 'โค้ดส่วนลด' ที่ถูกต้อง, กด 'ข้าม' หรือพิมพ์ 'ยกเลิก'";
-             else if (currentState === 'awaiting_angpao_link') reminderMsg = "กรุณาส่ง 'ลิงก์ซองอั่งเปา' ที่ถูกต้อง หรือพิมพ์ 'ยกเลิก'";
-             else if (currentState === 'awaiting_bank_slip') reminderMsg = "กรุณา 'ส่งรูปสลิป' หรือพิมพ์ 'ยกเลิก'";
-             else if (currentState === 'awaiting_redeem_code') reminderMsg = "กรุณาส่ง 'โค้ด 32 หลัก' ที่ถูกต้อง หรือพิมพ์ 'ยกเลิก'";
-             else if (currentState === 'select_method') reminderMsg = "กรุณาเลือกวิธีการชำระเงินจากปุ่มด้านบน หรือพิมพ์ 'ยกเลิก'";
-             await sendMessage(sender_psid, reminderMsg);
-             return; // Stop further processing
-        }
+         // If message is not handled by checkout logic above, but user IS in checkout state
+         else {
+             console.log(`User ${sender_psid} sent unhandled message during checkout step ${user.checkoutState.step}.`);
+             if (user.checkoutState.step === 'awaiting_angpao_link') await sendMessage(sender_psid, "กรุณาส่งเฉพาะ 'ลิงก์ซองอั่งเปา' หรือกด 'ยกเลิก'");
+             else if (user.checkoutState.step === 'awaiting_bank_slip') await sendMessage(sender_psid, "กรุณาส่งเฉพาะ 'รูปสลิป' หรือกด 'ยกเลิก'");
+             else if (user.checkoutState.step === 'awaiting_redeem_code') await sendMessage(sender_psid, "กรุณาส่งเฉพาะ 'โค้ด 32 หลัก' หรือกด 'ยกเลิก'");
+             else await sendMessage(sender_psid, "ขณะนี้คุณอยู่ในขั้นตอนการชำระเงิน กรุณาดำเนินการต่อ หรือกด 'ยกเลิก'");
+             return;
+         }
     }
-    // --- END Checkout Input Handling ---
 
-    // --- Priority 2: Quick Replies (if NOT handled by checkout) ---
+    // 2. Handle Quick Replies (if not in checkout)
     if (received_message.quick_reply?.payload) {
         console.log(`Quick Reply Payload: ${received_message.quick_reply.payload}`);
         await handlePostbackPayload(sender_psid, received_message.quick_reply.payload);
         return;
     }
 
-    // --- Priority 3: General Attachments (if NOT handled by checkout) ---
+    // 3. Handle Attachments (General - if not in checkout)
     if (received_message.attachments?.length > 0) {
-        const attachmentType = received_message.attachments[0].type;
-        console.log(`Received unhandled attachment type: ${attachmentType} from ${sender_psid}`);
-        // Optionally provide feedback for attachments not handled elsewhere
-        if (attachmentType === 'sticker') {
-             // await sendMessage(sender_psid, "สติกเกอร์น่ารัก!");
-        } else if (attachmentType === 'location') {
-             await sendMessage(sender_psid, "ขอบคุณสำหรับตำแหน่งครับ แต่ร้านเราส่งสินค้าออนไลน์นะ 😊");
-        } else if (attachmentType === 'audio' || attachmentType === 'video' || attachmentType === 'file') {
-             await sendMessage(sender_psid, `ขอบคุณสำหรับไฟล์ ${attachmentType} ครับ 👍 แต่ระบบยังไม่รองรับไฟล์ประเภทนี้โดยตรง`);
-        } else {
-             // Generic ack for other types like fallback, etc. if not handled earlier
-             // await sendMessage(sender_psid, `ได้รับ ${attachmentType} แล้วครับ 👍`);
-        }
-        return; // Stop processing after handling attachment
+        const attachment = received_message.attachments[0];
+        console.log(`Received unhandled attachment type: ${attachment.type}`);
+        if (attachment.type === 'image') await sendMessage(sender_psid, "ขอบคุณสำหรับรูปภาพครับ 👍 หากต้องการส่งสลิป กรุณาทำตามขั้นตอนชำระเงินก่อนนะครับ");
+        else if (['audio', 'video', 'file'].includes(attachment.type)) await sendMessage(sender_psid, `ขอบคุณสำหรับไฟล์ ${attachment.type} ครับ 😊`);
+        else if (attachment.type === 'fallback') await sendMessage(sender_psid, "ได้รับลิงก์/ไฟล์แนบที่ไม่รู้จักครับ ถ้าเป็นลิงก์ซองอั่งเปา กรุณาเริ่มขั้นตอนชำระเงินก่อนส่งนะครับ");
+        else await sendMessage(sender_psid, "ได้รับไฟล์แนบประเภทที่ไม่รองรับครับ");
+        return;
     }
 
-    // --- Priority 4: Text Commands & AI Chat (Only if NOT in checkout state) ---
+    // 4. Handle Text Messages (General Commands - if not in checkout)
     if (received_message.text) {
         let text = received_message.text.trim();
         const textLower = text.toLowerCase();
-        console.log(`Received text command/query from ${sender_psid}: "${text}"`);
+        console.log(`Received text: "${text}"`);
 
-        let commandHandled = false;
-
-        // Check standard commands first
-        if (['hi', 'hello', 'สวัสดี', 'หวัดดี', 'ดี', 'hey'].includes(textLower)) {
-            await sendMessage(sender_psid, "สวัสดีครับ! พิมพ์ 'สินค้า' เพื่อดูรายการ หรือ 'ช่วยเหลือ' เพื่อดูคำสั่งครับ 😊");
-            commandHandled = true;
-        } else if (['สินค้า', 'shop', 'menu', 'เมนู', 'product', 'products'].includes(textLower)) {
+        if (['hi', 'hello', 'สวัสดี', 'หวัดดี', 'sup', 'hey'].includes(textLower)) {
+            await sendMessage(sender_psid, "สวัสดีครับ! ยินดีให้บริการ พิมพ์ 'สินค้า' เพื่อดูรายการ หรือ 'ช่วยเหลือ' เพื่อดูคำสั่งทั้งหมดครับ 😊");
+        } else if (['สินค้า', 'ดูสินค้า', 'products', 'shop', 'menu', '/shop', 'เริ่ม'].includes(textLower)) {
             await showCategories(sender_psid);
-            commandHandled = true;
-        } else if (['ตะกร้า', 'cart', 'ดูตะกร้า'].includes(textLower)) {
+        } else if (['ตะกร้า', 'cart', 'ดูตะกร้า', '/cart'].includes(textLower)) {
             await viewCart(sender_psid);
-            commandHandled = true;
-        } else if (['ชำระเงิน', 'checkout', 'จ่ายเงิน', 'payment'].includes(textLower)) {
-             await checkout(sender_psid);
-             commandHandled = true;
-        } else if (['ช่วยเหลือ', 'help', 'คำสั่ง', 'command', 'commands'].includes(textLower)) {
+        } else if (['ชำระเงิน', 'checkout', 'payment', '/checkout'].includes(textLower)) {
+            await checkout(sender_psid);
+        } else if (['ช่วยเหลือ', 'help', 'คำสั่ง', '/help'].includes(textLower)) {
             await showHelp(sender_psid);
-            commandHandled = true;
-        } else if (['แนะนำ', 'featured', 'มาใหม่', 'recommend'].includes(textLower)) {
+        } else if (['แนะนำ', 'featured', '/featured'].includes(textLower)) {
             await showFeaturedProducts(sender_psid);
-            commandHandled = true;
-        } else if (['ล้างตะกร้า', 'clear cart'].includes(textLower)) {
+        } else if (['ล้างตะกร้า', 'clear cart', '/clearcart'].includes(textLower)) {
             await clearCart(sender_psid);
-            commandHandled = true;
-        } else if (['ยกเลิก', 'cancel'].includes(textLower)) {
-            // Explicit cancel command when *not* in checkout
-            await sendMessage(sender_psid, "ไม่ได้อยู่ในขั้นตอนใดๆ ที่ต้องยกเลิกครับ หากต้องการยกเลิกการชำระเงิน ให้เริ่มชำระเงินก่อนแล้วพิมพ์ 'ยกเลิก'");
-            commandHandled = true;
+        } else if (['ยกเลิก', 'cancel', '/cancel'].includes(textLower)) {
+            await cancelPayment(sender_psid); // cancelPayment checks state internally
         } else if (textLower.startsWith('ค้นหา ') || textLower.startsWith('search ')) {
-            const searchTerm = text.substring(textLower.indexOf(' ') + 1).trim();
-            await searchProducts(sender_psid, searchTerm);
-            commandHandled = true;
-        } else if (['ขอบคุณ', 'ขอบใจ', 'thanks', 'thank you', 'ty'].includes(textLower)) {
-            await sendMessage(sender_psid, "ยินดีเสมอครับ! 😊");
-            commandHandled = true;
+             const searchTerm = text.substring(textLower.indexOf(' ')+1);
+             await searchProducts(sender_psid, searchTerm);
+        } else if (['ขอบคุณ', 'thanks', 'thank you', 'ty'].includes(textLower)) {
+             await sendMessage(sender_psid, "ยินดีเสมอครับ! 😊");
         }
-
-        // --- Priority 5: AI Chat Fallback ---
-        if (!commandHandled && loadedConfig.aiChatEnabled) {
-            console.log(`Text "${text}" not a known command, attempting AI response...`);
-            await sendTypingIndicator(sender_psid);
-            const aiReply = await getAIResponse(text);
-            await sendTypingIndicator(sender_psid, 'typing_off');
-
-            if (aiReply) {
-                await sendMessage(sender_psid, aiReply);
-                console.log("AI response sent successfully.");
-            } else {
-                // AI is enabled but failed or returned no response
-                console.warn("AI is enabled but failed to provide a response.");
-                await sendMessage(sender_psid, `ขออภัย ระบบ AI ไม่สามารถตอบคำถามนี้ได้ในขณะนี้ ลองถามใหม่อีกครั้ง หรือพิมพ์ 'ช่วยเหลือ' เพื่อดูคำสั่งอื่นๆ ครับ`);
-            }
-             commandHandled = true; // Mark as handled (either by AI or AI failure message)
-        }
-
-        // Final Fallback if no command and AI is disabled or failed silently (shouldn't happen with above logic)
-        if (!commandHandled) {
+        // --- Easter Egg / Debug ---
+        // else if (textLower === '/mypsid') {
+        //      await sendMessage(sender_psid, `Your PSID is: ${sender_psid}`);
+        // }
+        else {
+            console.log(`Unrecognized text command: "${text}"`);
             await sendMessage(sender_psid, `ขออภัย ไม่เข้าใจคำสั่ง "${text}"\nลองพิมพ์ 'ช่วยเหลือ' เพื่อดูคำสั่งทั้งหมดนะครับ`);
         }
-
-        return; // End text message handling
+    } else {
+        console.log("Received message without standard text or attachments.");
+        // Optionally send a generic reply or do nothing
+         await sendMessage(sender_psid, "ได้รับข้อความของคุณแล้วครับ 😊 หากต้องการดูสินค้า พิมพ์ 'สินค้า' ได้เลย");
     }
-
-    // Fallback for unhandled message types (should be rare)
-    console.log(`Received unhandled message content from ${sender_psid}:`, JSON.stringify(received_message));
 }
+
 async function handlePostback(sender_psid, received_postback) {
     let payload = received_postback.payload;
-    let referral = received_postback.referral;
-    if (referral) {
-        // Handle referral data if needed, e.g., tracking entry points
-        console.log(`Handling postback with referral from ${sender_psid}, Ref: ${JSON.stringify(referral)} Payload: ${payload}`);
-        if (!payload) payload = 'GET_STARTED'; // Treat referral without payload as get started
-    } else {
-        console.log(`Handling postback from ${sender_psid}, Payload: ${payload}`);
-    }
-
+    let title = received_postback.title;
+    console.log(`Handling postback from ${sender_psid}, Title: "${title}", Payload: ${payload}`);
     await handlePostbackPayload(sender_psid, payload);
 }
-// Central handler for both Postbacks and Quick Replies Payloads
+
+// Central function to process payloads from postbacks AND quick replies
 async function handlePostbackPayload(sender_psid, payload) {
     const user = getUserData(sender_psid);
-    console.log(`Processing Payload: "${payload}" for User: ${sender_psid}, Checkout State: ${user.checkoutState?.step || 'None'}`);
-
     try {
-        // --- State Validation for Checkout Actions ---
-        const requiresCheckoutState = [
-            'APPLY_DISCOUNT_PROMPT', 'SKIP_DISCOUNT', 'PAYMENT_ANGPAO',
-            'PAYMENT_BANK', 'PAYMENT_REDEEM_CODE', 'CANCEL_PAYMENT'
-        ];
-        const isCheckoutAction = requiresCheckoutState.includes(payload);
-        const isDiscountPromptAction = ['APPLY_DISCOUNT_PROMPT', 'SKIP_DISCOUNT'].includes(payload);
-        const isPaymentMethodSelection = payload.startsWith('PAYMENT_');
-
-        if (isCheckoutAction && !user.checkoutState) {
-            console.warn(`Ignoring stale checkout button "${payload}" from ${sender_psid}. User not in checkout state.`);
-            await sendMessage(sender_psid, "ปุ่มนี้อาจเก่าเกินไป หรือคุณไม่ได้อยู่ในขั้นตอนชำระเงิน หากต้องการเริ่มชำระเงิน กด 'ดูตะกร้า' แล้วกด 'ชำระเงิน' ครับ");
+        // --- Always allow cancellation regardless of state ---
+        if (payload === 'CANCEL_PAYMENT') {
+            await cancelPayment(sender_psid);
             return;
         }
 
-         if (isPaymentMethodSelection && user.checkoutState?.step !== 'select_method') {
-             console.warn(`Ignoring payment button "${payload}" from ${sender_psid} in wrong state (${user.checkoutState?.step}). Expected 'select_method'.`);
-             await sendMessage(sender_psid, "กรุณาทำตามขั้นตอนปัจจุบันก่อนเลือกวิธีชำระเงินครับ (หรือกด 'ยกเลิก' เพื่อเริ่มใหม่)");
-             return;
-         }
-         if (isDiscountPromptAction) {
-            if (!user.checkoutState || !['awaiting_discount_or_payment', 'awaiting_discount_code'].includes(user.checkoutState.step)) {
-                console.warn(`Ignoring discount button "${payload}" from ${sender_psid} in invalid state (${user.checkoutState?.step}). Expected 'awaiting_discount_or_payment' or 'awaiting_discount_code'.`);
-                if (user.checkoutState?.autoDiscountApplied) {
-                     await sendMessage(sender_psid, "ระบบได้ใช้โปรโมชั่นอัตโนมัติแล้ว ไม่สามารถใช้โค้ดอื่นได้ครับ");
-                } else if (user.checkoutState?.step === 'select_method') {
-                     await sendMessage(sender_psid, "คุณได้ข้ามขั้นตอนส่วนลดแล้ว กรุณาเลือกวิธีชำระเงิน หรือ 'ยกเลิก' เพื่อเริ่มใหม่");
-                } else {
-                     await sendMessage(sender_psid, "ไม่สามารถใช้ส่วนลดในขั้นตอนนี้ได้ (หรือปุ่มอาจเก่าเกินไป)");
-                }
-                return;
+        // --- Handle checkout specific postbacks first ---
+        if (user.checkoutState) {
+            if (payload === 'PAYMENT_ANGPAO' && user.checkoutState.step === 'select_method') {
+                 await processPaymentMethod(sender_psid, 'angpao'); return;
             }
-         }
+            if (payload === 'PAYMENT_BANK' && user.checkoutState.step === 'select_method') {
+                 await processPaymentMethod(sender_psid, 'bank'); return;
+            }
+             if (payload === 'PAYMENT_REDEEM_CODE' && user.checkoutState.step === 'select_method') {
+                 await processPaymentMethod(sender_psid, 'redeem_code'); return;
+            }
+             // If in checkout but payload is not a checkout action or cancel, maybe inform user?
+             if (!payload.startsWith('PAYMENT_') && payload !== 'CANCEL_PAYMENT') {
+                 console.log(`User ${sender_psid} clicked non-checkout payload "${payload}" during checkout step ${user.checkoutState.step}`);
+                 await sendMessage(sender_psid, "ขณะนี้คุณอยู่ในขั้นตอนการชำระเงิน กรุณาดำเนินการต่อ หรือกด 'ยกเลิก'");
+                 return; // Prevent other actions while in checkout
+             }
+        }
 
-        // --- Payload Routing ---
-        // Use a switch for better organization
-        switch (payload) {
-            case 'GET_STARTED':
-                await sendImageMessage(sender_psid, loadedConfig.welcomeGif);
-                await sendMessage(sender_psid, "สวัสดีครับ! ยินดีต้อนรับสู่ร้านค้า 😊");
-                await showCategories(sender_psid);
-                break;
-            case 'SHOW_CATEGORIES':
-                await showCategories(sender_psid);
-                break;
-            case 'CART_VIEW':
-                await viewCart(sender_psid);
-                break;
-            case 'CART_CLEAR':
-                await clearCart(sender_psid);
-                break;
-            case 'CHECKOUT':
-                await checkout(sender_psid);
-                break;
-            case 'APPLY_DISCOUNT_PROMPT':
-                await promptForDiscountCode(sender_psid);
-                break;
-            case 'SKIP_DISCOUNT':
-                await skipDiscountAndProceed(sender_psid);
-                break;
-            case 'PAYMENT_ANGPAO':
-                await processPaymentMethod(sender_psid, 'angpao');
-                break;
-            case 'PAYMENT_BANK':
-                await processPaymentMethod(sender_psid, 'bank');
-                break;
-            case 'PAYMENT_REDEEM_CODE':
-                await processPaymentMethod(sender_psid, 'redeem_code');
-                break;
-            case 'CANCEL_PAYMENT':
-                await cancelPayment(sender_psid);
-                break;
-            case 'HELP':
-                await showHelp(sender_psid);
-                break;
-            case 'FEATURED_PRODUCTS':
-                await showFeaturedProducts(sender_psid);
-                break;
-            default:
-                // Handle dynamic payloads (like CATEGORY_, PRODUCT_VIEW_, etc.)
-                if (payload.startsWith('CATEGORY_')) {
-                    const categoryName = payload.substring('CATEGORY_'.length);
-                    await showProductsByCategory(sender_psid, categoryName, 0);
-                } else if (payload.startsWith('MORE_PRODUCTS_')) {
-                    const parts = payload.substring('MORE_PRODUCTS_'.length).split('_');
-                    const page = parseInt(parts.pop(), 10);
-                    const categoryName = parts.join('_');
-                    if (!isNaN(page) && page >= 0 && categoryName) {
-                        await showProductsByCategory(sender_psid, categoryName, page);
-                    } else {
-                        console.error(`Invalid MORE_PRODUCTS payload format: "${payload}"`);
-                        await sendMessage(sender_psid, "เกิดข้อผิดพลาดในการโหลดหน้าถัดไป");
-                    }
-                } else if (payload.startsWith('PRODUCT_VIEW_')) {
-                    const productId = payload.substring('PRODUCT_VIEW_'.length);
-                    await showProductDetail(sender_psid, productId);
-                } else if (payload.startsWith('PRODUCT_ADD_TO_CART_')) {
-                    const productId = payload.substring('PRODUCT_ADD_TO_CART_'.length);
-                    await addToCart(sender_psid, productId);
-                } else if (payload.startsWith('CART_REMOVE_')) {
-                    const productId = payload.substring('CART_REMOVE_'.length);
-                    await removeFromCart(sender_psid, productId);
-                } else {
-                    console.warn(`Unhandled payload received: "${payload}" from ${sender_psid}`);
-                     // Avoid sending generic error if it was likely a stale checkout button
-                     if (!isCheckoutAction) {
-                          await sendMessage(sender_psid, "ขออภัย ไม่รู้จักคำสั่งนี้ หรืออาจเป็นปุ่มเก่า");
-                     }
-                }
-                break;
+        // --- Handle General Payloads (if not in checkout or handled above) ---
+        if (payload === 'GET_STARTED') {
+             if (runtimeConfig.welcomeGif) await sendImageMessage(sender_psid, runtimeConfig.welcomeGif);
+             await sendMessage(sender_psid, "สวัสดีครับ! ยินดีต้อนรับสู่ร้านค้า ยินดีให้บริการครับ 😊");
+             await showCategories(sender_psid);
+        }
+        // Navigation
+        else if (payload === 'SHOW_CATEGORIES') await showCategories(sender_psid);
+        else if (payload.startsWith('CATEGORY_')) await showProductsByCategory(sender_psid, payload.substring('CATEGORY_'.length), 0);
+        else if (payload.startsWith('MORE_PRODUCTS_')) {
+             const parts = payload.substring('MORE_PRODUCTS_'.length).split('_');
+             const page = parseInt(parts.pop());
+             const categoryName = parts.join('_');
+             if (!isNaN(page) && categoryName) await showProductsByCategory(sender_psid, categoryName, page);
+             else { console.error("Invalid MORE_PRODUCTS payload:", payload); await sendMessage(sender_psid, "ผิดพลาดในการโหลดหน้าถัดไป"); }
+        }
+        else if (payload.startsWith('PRODUCT_VIEW_')) await showProductDetail(sender_psid, payload.substring('PRODUCT_VIEW_'.length));
+        // Cart Management
+        else if (payload === 'CART_VIEW') await viewCart(sender_psid);
+        else if (payload === 'CART_CLEAR') await clearCart(sender_psid);
+        else if (payload.startsWith('PRODUCT_ADD_TO_CART_')) await addToCart(sender_psid, payload.substring('PRODUCT_ADD_TO_CART_'.length));
+        else if (payload.startsWith('CART_REMOVE_INSTANCE_')) await removeFromCartInstance(sender_psid, payload.substring('CART_REMOVE_INSTANCE_'.length));
+        // Checkout (Initiation)
+        else if (payload === 'CHECKOUT') await checkout(sender_psid);
+        // Other Actions
+        else if (payload === 'HELP') await showHelp(sender_psid);
+        else if (payload === 'FEATURED_PRODUCTS') await showFeaturedProducts(sender_psid);
+        // Fallback
+        else {
+            console.warn(`Unhandled payload: "${payload}" from ${sender_psid}`);
+            await sendMessage(sender_psid, "ขออภัย ไม่รู้จักคำสั่งนี้");
         }
     } catch (error) {
-        console.error(`Error handling payload "${payload}" for ${sender_psid}:`, error);
-        await sendMessage(sender_psid, "ขออภัย เกิดข้อผิดพลาด โปรดลองอีกครั้ง หรือติดต่อแอดมิน");
-        // Attempt recovery based on state
-        const currentUser = getUserData(sender_psid);
-        if (currentUser.checkoutState) {
-             console.log(`Attempting to cancel payment state for user ${sender_psid} after error during payload handling.`);
-             await cancelPayment(sender_psid); // Try to cancel checkout if error occurred during it
-        } else {
-             console.log(`Showing categories for user ${sender_psid} after error during non-checkout payload handling.`);
-             await showCategories(sender_psid); // Fallback to categories otherwise
-        }
+         console.error(`Error handling payload "${payload}" for ${sender_psid}:`, error);
+         await sendMessage(sender_psid, "ขออภัย เกิดข้อผิดพลาดในการประมวลผลคำสั่ง โปรดลองอีกครั้ง หรือติดต่อแอดมิน");
+         // Attempt gentle recovery - cancel payment if stuck, else show categories
+         if (user.checkoutState) await cancelPayment(sender_psid);
+         else await showCategories(sender_psid);
     }
 }
 // --- End Handlers ---
 
+
 // --- Admin Dashboard Setup and Routes ---
-function validateImageUrl(url) {
-    if (!url || typeof url !== 'string') return false;
-    const trimmedUrl = url.trim();
-    // Allow http or https, various image formats, optional query params
-    const pattern = /^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?.*)?$/i;
-    return pattern.test(trimmedUrl);
-}
-
-const viewsDir = path.join(__dirname, 'views');
-if (!fs.existsSync(viewsDir)) fs.mkdirSync(viewsDir, { recursive: true });
-const publicDir = path.join(__dirname, 'public');
-if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
-
-// --- Admin Routes ---
+// --- (Dashboard, Products, Categories, Orders, Codes routes unchanged from previous version) ---
+// --- (They now implicitly use config via the functions they call) ---
+// --- GET /admin ---
 app.get('/admin', (req, res) => {
-    try {
-        // Ensure stock counts are fresh for display
-        shopData.products.forEach(p => { p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0; });
-
-        const completedOrders = shopData.orders.filter(o => o.status === 'completed');
-        const totalRevenue = completedOrders
-            .reduce((sum, o) => sum + (o.finalAmount !== undefined ? o.finalAmount : ((o.originalTotalAmount || 0) - (o.discountAmount || 0))), 0);
-        const totalDiscountsGiven = completedOrders
-             .reduce((sum, o) => sum + (o.discountAmount || 0), 0);
-        const activeDiscountCodes = discountCodes.filter(dc =>
-                (!dc.expiresAt || new Date(dc.expiresAt) >= new Date()) &&
-                (dc.maxUses === null || (dc.uses || 0) < dc.maxUses)
-            ).length;
-
+     try {
         const stats = {
-            totalProducts: shopData.products.length,
-            totalCategories: shopData.categories.length,
-            totalOrders: shopData.orders.length,
-            completedOrders: completedOrders.length,
-            totalRevenue: totalRevenue.toFixed(2),
-            totalDiscountsGiven: totalDiscountsGiven.toFixed(2),
-            activeDiscountCodes: activeDiscountCodes,
-            autoPromotionStatus: loadedConfig.autoPromotionEnabled
-                ? `เปิดใช้งาน (${loadedConfig.autoPromotionPercentage}% เมื่อซื้อครบ ${loadedConfig.autoPromotionMinPurchase.toFixed(2)}฿)`
-                : 'ปิดใช้งาน',
-            aiChatStatus: loadedConfig.aiChatEnabled ? 'เปิดใช้งาน' : 'ปิดใช้งาน', // AI Status
-            recentOrders: [...shopData.orders]
-                .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-                .slice(0, 5)
+             totalProducts: shopData.products.length,
+             totalStockItems: shopData.products.reduce((sum, p) => sum + (p.downloadUrls?.length || 0), 0),
+             totalCategories: shopData.categories.length,
+             totalOrders: shopData.orders.length,
+             completedOrders: shopData.orders.filter(o => o.status === 'completed').length,
+             totalRevenue: shopData.orders
+                             .filter(o => o.status === 'completed' && typeof o.totalAmount === 'number')
+                             .reduce((sum, o) => sum + o.totalAmount, 0)
+                             .toFixed(2),
+             recentOrders: [...shopData.orders]
+                           .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                           .slice(0, 5)
         };
-        res.render('dashboard', { stats, pageTitle: 'Dashboard' });
-    } catch (error) {
-        console.error("Error rendering dashboard:", error);
-        res.status(500).send("Error loading dashboard.");
-    }
+        res.render('dashboard', { stats });
+     } catch (error) {
+         console.error("Error rendering admin dashboard:", error);
+         res.status(500).send("Error loading dashboard data.");
+     }
 });
 
-// --- Facebook Connection Check Function ---
-async function checkFacebookConnection() {
-    if (!loadedConfig.fbPageAccessToken) {
-        return { status: 'error', message: '❌ ยังไม่ได้ตั้งค่า Page Access Token' };
-    }
-    try {
-        const response = await axios.get(`https://graph.facebook.com/v19.0/me`, {
-            params: {
-                fields: 'id,name',
-                access_token: loadedConfig.fbPageAccessToken
-            },
-            timeout: 10000
-        });
-
-        if (response.status === 200 && response.data && response.data.id) {
-            console.log("Facebook connection check successful:", response.data.name);
-            return { status: 'success', message: `✅ เชื่อมต่อสำเร็จ (เพจ: ${response.data.name} - ${response.data.id})` };
-        } else {
-            console.error("Facebook connection check failed: Unexpected response", response.status, response.data);
-            return { status: 'error', message: `❌ เชื่อมต่อล้มเหลว (สถานะ: ${response.status})` };
-        }
-    } catch (error) {
-        console.error("Facebook connection check error:", error.message);
-        let errorMsg = '❌ เชื่อมต่อล้มเหลว';
-        if (axios.isAxiosError(error)) {
-            if (error.response) {
-                 const fbError = error.response.data?.error;
-                 if (fbError) {
-                     errorMsg += `: ${fbError.message || fbError.type || 'API Error'}`;
-                     if (fbError.type === 'OAuthException') errorMsg += ' (Token ไม่ถูกต้อง?)';
-                     else if (fbError.code === 190) errorMsg += ' (Token หมดอายุ/ไม่ถูกต้อง?)';
-                 } else {
-                      errorMsg += ` (HTTP ${error.response.status})`;
-                 }
-            } else if (error.request) {
-                 errorMsg += ' (ไม่สามารถเชื่อมต่อ Facebook)';
-            } else {
-                 errorMsg += ` (ผิดพลาด: ${error.message})`;
-            }
-             if (error.code === 'ECONNABORTED') errorMsg = '❌ เชื่อมต่อล้มเหลว (หมดเวลา)';
-             else if (error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN') errorMsg = '❌ เชื่อมต่อล้มเหลว (ปัญหา DNS/Network)';
-        } else {
-            errorMsg += ` (ผิดพลาด: ${error.message})`;
-        }
-        return { status: 'error', message: errorMsg };
-    }
-}
-
-// --- Settings Route ---
-app.get('/admin/settings', async (req, res) => {
-    try {
-        const connectionCheck = await checkFacebookConnection();
-        res.render('settings', {
-            config: { ...loadedConfig }, // Pass a copy
-            message: req.query.message,
-            error: req.query.error,
-            connectionStatus: connectionCheck,
-            pageTitle: 'Settings'
-        });
-    } catch (renderError) {
-        console.error("Error rendering settings page:", renderError);
-        res.status(500).send("Error loading settings page.");
-    }
-});
-app.post('/admin/settings/save', (req, res) => {
-    try {
-        const oldVerifyToken = loadedConfig.fbVerifyToken;
-        const oldAccessToken = loadedConfig.fbPageAccessToken;
-        const oldPort = loadedConfig.serverPort;
-        const oldHttps = loadedConfig.enableHttps;
-        const oldKeyPath = loadedConfig.sslKeyPath;
-        const oldCertPath = loadedConfig.sslCertPath;
-
-        let restartNeeded = false;
-        let errors = [];
-
-        // --- Facebook ---
-        loadedConfig.fbVerifyToken = req.body.fbVerifyToken?.trim() || '';
-        loadedConfig.fbPageAccessToken = req.body.fbPageAccessToken?.trim() || '';
-        loadedConfig.adminContactLink = req.body.adminContactLink?.trim() || '';
-        loadedConfig.welcomeGif = req.body.welcomeGif?.trim() || DEFAULT_CONFIG.welcomeGif;
-        if (!loadedConfig.fbVerifyToken) errors.push("Facebook Verify Token ห้ามว่าง");
-        if (loadedConfig.adminContactLink && !loadedConfig.adminContactLink.startsWith('https://m.me/')) errors.push("รูปแบบ ลิงก์ติดต่อแอดมิน ไม่ถูกต้อง (ควรเป็น https://m.me/...)");
-        if (loadedConfig.welcomeGif && !validateImageUrl(loadedConfig.welcomeGif)) errors.push("รูปแบบ URL Welcome GIF ไม่ถูกต้อง");
-
-        // --- Wallet ---
-        loadedConfig.walletPhone = req.body.walletPhone?.trim() || '';
-        loadedConfig.walletImage = req.body.walletImage?.trim() || DEFAULT_CONFIG.walletImage;
-        if (!loadedConfig.walletPhone || !/^[0-9]{10}$/.test(loadedConfig.walletPhone)) {
-            errors.push("เบอร์ Wallet ร้านค้า (สำหรับรับซอง) ต้องเป็น 10 หลัก และห้ามว่าง");
-        }
-        if (loadedConfig.walletImage && !validateImageUrl(loadedConfig.walletImage)) errors.push("รูปแบบ URL รูป Wallet ไม่ถูกต้อง");
-
-
-        // --- Bank ---
-        loadedConfig.bankAccountDetails = req.body.bankAccountDetails?.trim() || '';
-        loadedConfig.bankImage = req.body.bankImage?.trim() || DEFAULT_CONFIG.bankImage;
-        if (loadedConfig.bankAccountDetails.length < 10) errors.push("ข้อมูลบัญชีธนาคาร สั้นเกินไป (ต้องระบุ ธนาคาร, เลข, ชื่อ)");
-        if (loadedConfig.bankImage && !validateImageUrl(loadedConfig.bankImage)) errors.push("รูปแบบ URL รูป Bank ไม่ถูกต้อง");
-
-        // --- Xncly ---
-        loadedConfig.xnclyClientIdSecret = req.body.xnclyClientIdSecret?.trim() || '';
-        loadedConfig.xnclyCheckUrl = req.body.xnclyCheckUrl?.trim() || DEFAULT_CONFIG.xnclyCheckUrl;
-        if (loadedConfig.xnclyClientIdSecret && !loadedConfig.xnclyClientIdSecret.includes(':')) errors.push("รูปแบบ Xncly ClientID:Secret ไม่ถูกต้อง"); // Allow empty if not used
-        if (!loadedConfig.xnclyCheckUrl.startsWith('http')) errors.push("รูปแบบ Xncly Check URL ไม่ถูกต้อง");
-
-        // --- Images ---
-        loadedConfig.codeRedemptionImage = req.body.codeRedemptionImage?.trim() || DEFAULT_CONFIG.codeRedemptionImage;
-        loadedConfig.discountImage = req.body.discountImage?.trim() || DEFAULT_CONFIG.discountImage;
-        if (loadedConfig.codeRedemptionImage && !validateImageUrl(loadedConfig.codeRedemptionImage)) errors.push("รูปแบบ URL รูป Code Redemption ไม่ถูกต้อง");
-        if (loadedConfig.discountImage && !validateImageUrl(loadedConfig.discountImage)) errors.push("รูปแบบ URL รูป Discount Feature ไม่ถูกต้อง");
-
-        // --- Auto Promotion ---
-        loadedConfig.autoPromotionEnabled = req.body.autoPromotionEnabled === 'on';
-        loadedConfig.autoPromotionPercentage = parseFloat(req.body.autoPromotionPercentage) || 0;
-        loadedConfig.autoPromotionMinPurchase = parseFloat(req.body.autoPromotionMinPurchase) || 0;
-        if (loadedConfig.autoPromotionPercentage < 0 || loadedConfig.autoPromotionPercentage > 100) errors.push("เปอร์เซ็นต์โปรโมชั่น ต้องอยู่ระหว่าง 0-100");
-        if (loadedConfig.autoPromotionMinPurchase < 0) errors.push("ยอดซื้อขั้นต่ำโปรโมชั่น ห้ามติดลบ");
-
-        // --- Server & Connection ---
-        const newPort = parseInt(req.body.serverPort, 10);
-        const newEnableHttps = req.body.enableHttps === 'on';
-        const newSslKeyPath = req.body.sslKeyPath?.trim() || '';
-        const newSslCertPath = req.body.sslCertPath?.trim() || '';
-
-        if (!isNaN(newPort) && newPort > 0 && newPort <= 65535) {
-            loadedConfig.serverPort = newPort;
-        } else {
-            errors.push("Port ไม่ถูกต้อง (ต้องเป็นเลข 1-65535)");
-        }
-        loadedConfig.enableHttps = newEnableHttps;
-        loadedConfig.sslKeyPath = newSslKeyPath;
-        loadedConfig.sslCertPath = newSslCertPath;
-
-        if (newEnableHttps && (!newSslKeyPath || !newSslCertPath)) {
-            errors.push("หากเปิด HTTPS ต้องระบุ SSL Key Path และ SSL Cert Path");
-        }
-
-        if (loadedConfig.serverPort !== oldPort || loadedConfig.enableHttps !== oldHttps || loadedConfig.sslKeyPath !== oldKeyPath || loadedConfig.sslCertPath !== oldCertPath) {
-            restartNeeded = true;
-        }
-
-        // --- AI Chat Settings ---
-        loadedConfig.aiChatEnabled = req.body.aiChatEnabled === 'on';
-        loadedConfig.aiApiKey = req.body.aiApiKey?.trim() || '';
-        loadedConfig.aiApiUrl = req.body.aiApiUrl?.trim() || '';
-
-        if (loadedConfig.aiChatEnabled && (!loadedConfig.aiApiKey || !loadedConfig.aiApiUrl)) {
-            errors.push("หากเปิดใช้งาน AI Chat ต้องระบุ AI API Key และ AI API URL"); // Correct validation
-        }
-         if (loadedConfig.aiApiUrl && !loadedConfig.aiApiUrl.startsWith('http')) {
-             errors.push("รูปแบบ AI API URL ไม่ถูกต้อง");
-         }
-
-        // --- Final Check & Save ---
-        if (errors.length > 0) {
-             throw new Error(errors.join('\\n')); // Use \\n for multi-line alert in EJS
-        }
-
-        saveConfig();
-        console.log("Admin: Settings updated.");
-        let message = "บันทึกการตั้งค่าสำเร็จ";
-        if (restartNeeded) {
-            message += " ⚠️ กรุณารีสตาร์ทเซิร์ฟเวอร์เพื่อให้การตั้งค่า Port/HTTPS มีผล!";
-            console.warn("Server configuration changed. RESTART REQUIRED for changes to take effect.");
-        }
-        if (loadedConfig.fbVerifyToken !== oldVerifyToken || loadedConfig.fbPageAccessToken !== oldAccessToken) {
-            message += " (Token Facebook เปลี่ยนแปลงแล้ว กรุณาตรวจสอบการเชื่อมต่อ)";
-        }
-        console.log(`Server Settings Saved: Port=${loadedConfig.serverPort}, HTTPS=${loadedConfig.enableHttps}, Key=${loadedConfig.sslKeyPath}, Cert=${loadedConfig.sslCertPath}`);
-        console.log(`Auto Promotion status saved: Enabled=${loadedConfig.autoPromotionEnabled}, Percentage=${loadedConfig.autoPromotionPercentage}, MinPurchase=${loadedConfig.autoPromotionMinPurchase}`);
-        console.log(`AI Chat status saved: Enabled=${loadedConfig.aiChatEnabled}, Key=${loadedConfig.aiApiKey ? '******' : 'None'}, URL=${loadedConfig.aiApiUrl}`);
-
-
-        res.redirect('/admin/settings?message=' + encodeURIComponent(message));
-    } catch (error) {
-        console.error("Error saving settings:", error);
-        // Reload config to revert potential partial changes before redirecting
-        loadConfig();
-        res.redirect('/admin/settings?error=' + encodeURIComponent('ผิดพลาด:\\n' + error.message));
-    }
-});
-// --- End Settings Route ---
-
-// --- Product Routes ---
+// --- GET /admin/products ---
 app.get('/admin/products', (req, res) => {
-    try {
-        shopData.products.forEach(p => { p.stock = Array.isArray(p.stockItems) ? p.stockItems.length : 0; });
-        const sortedProducts = [...shopData.products].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-        res.render('products', {
-             products: sortedProducts,
-             categories: shopData.categories,
-             message: req.query.message,
-             error: req.query.error,
-             pageTitle: 'Products'
-         });
-    } catch (error) {
-        console.error("Error rendering products page:", error);
-        res.status(500).send("Error loading product data.");
-    }
+     try {
+        const sortedProducts = [...shopData.products].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        res.render('products', { products: sortedProducts, categories: shopData.categories });
+     } catch (error) {
+         console.error("Error rendering products page:", error);
+         res.status(500).send("Error loading product data.");
+     }
 });
+
+// --- POST /admin/products/add ---
 app.post('/admin/products/add', (req, res) => {
-    let errorMsg = '', successMsg = '';
     try {
-        const { name, price, category, description, language, version, imageUrl, stockItemsInput } = req.body;
-        let errors = [];
-
-        if (!name?.trim()) errors.push('ชื่อสินค้าห้ามว่าง');
-        if (!price) errors.push('ราคาห้ามว่าง');
-        if (!category) errors.push('ต้องเลือกหมวดหมู่');
-        if (!imageUrl?.trim()) errors.push('URL รูปภาพห้ามว่าง');
-        if (!stockItemsInput?.trim()) errors.push('ข้อมูลสต็อกห้ามว่าง');
-
-        const parsedPrice = parseFloat(price);
-        if (isNaN(parsedPrice) || parsedPrice < 0) errors.push('ราคาไม่ถูกต้อง');
-        if (imageUrl && !validateImageUrl(imageUrl)) errors.push('รูปแบบ URL รูปภาพไม่ถูกต้อง (ต้องเป็น http/https และลงท้ายด้วย .jpg, .png, .gif, .webp etc.)');
-        if (category && !shopData.categories.some(cat => cat.name === category)) errors.push('หมวดหมู่ที่เลือกไม่มีอยู่จริง');
-
-        const stockItems = stockItemsInput ? stockItemsInput.split('\n').map(line => line.trim()).filter(line => line.length > 0) : [];
-        if (stockItems.length === 0 && stockItemsInput?.trim()) {
-             errors.push('ข้อมูลสต็อกต้องมีอย่างน้อย 1 บรรทัด (ไม่นับบรรทัดว่าง)');
-        } else if (stockItems.length === 0 && !stockItemsInput?.trim()){
-             errors.push('ข้อมูลสต็อกห้ามว่าง (ต้องมีอย่างน้อย 1 บรรทัด)');
-        }
-
-        if (errors.length > 0) throw new Error(errors.join(', '));
-
+        const { name, price, category, description, language, version, imageUrl, downloadUrlsText } = req.body;
+        if (!name || !price || !category || !imageUrl || !downloadUrlsText) return res.status(400).send('Missing required fields (Name, Price, Category, Image URL, Download Info).');
+        if (isNaN(parseFloat(price)) || parseFloat(price) < 0) return res.status(400).send('Invalid price.');
+        if (!validateImageUrl(imageUrl)) return res.status(400).send('Invalid image URL format (Need https://... or data:image/...).');
+        if (!shopData.categories.some(cat => cat.name === category)) return res.status(400).send('Selected category does not exist.');
+        const downloadUrls = downloadUrlsText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+        if (downloadUrls.length === 0) return res.status(400).send('Download Info cannot be empty. Each line represents one stock item.');
         const newProduct = {
             id: `P-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            name: name.trim(),
-            price: parsedPrice,
-            stockItems: stockItems,
-            stock: stockItems.length,
-            category: category,
-            description: description ? description.trim() : '',
-            language: language ? language.trim() : '',
-            version: version ? version.trim() : '',
-            imageUrl: imageUrl.trim(),
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            name: name.trim(), price: parseFloat(price), category: category,
+            description: description ? description.trim() : '', language: language ? language.trim() : '',
+            version: version ? version.trim() : '', imageUrl: imageUrl.trim(), downloadUrls: downloadUrls,
+            createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
         };
         shopData.products.push(newProduct);
         saveShopData();
-        successMsg = `เพิ่มสินค้า "${newProduct.name}" สำเร็จ (${newProduct.stock} ชิ้น).`;
-        console.log(`Admin: ${successMsg} (ID: ${newProduct.id})`);
-        res.redirect(`/admin/products?message=${encodeURIComponent(successMsg)}`);
-    } catch (error) {
-        console.error("Error adding product:", error);
-        errorMsg = `ผิดพลาด: ${error.message}`;
-        res.redirect(`/admin/products?error=${encodeURIComponent(errorMsg)}`);
-    }
+        console.log(`Admin: Product added - ${newProduct.name} (ID: ${newProduct.id}), Stock: ${newProduct.downloadUrls.length}`);
+        res.redirect('/admin/products');
+    } catch (error) { console.error("Error adding product via admin:", error); res.status(500).send("Error processing request."); }
 });
+
+// --- POST /admin/products/edit/:id ---
 app.post('/admin/products/edit/:id', (req, res) => {
-     let errorMsg = '', successMsg = '';
-     const { id } = req.params;
-     console.log(`Admin: Attempting to edit product ID: ${id}`);
-    try {
-        const { name, price, category, description, language, version, imageUrl, stockItemsToAdd } = req.body;
-        let errors = [];
-
-        console.log("Received data for edit:", { name, price, category, imageUrl, stockItemsToAdd: stockItemsToAdd?.substring(0, 50) + '...' }); // Log received data
-
-        if (!name?.trim()) errors.push('ชื่อสินค้าห้ามว่าง');
-        if (!price) errors.push('ราคาห้ามว่าง');
-        if (!category) errors.push('ต้องเลือกหมวดหมู่');
-        if (!imageUrl?.trim()) errors.push('URL รูปภาพห้ามว่าง');
-
-         const parsedPrice = parseFloat(price);
-        if (isNaN(parsedPrice) || parsedPrice < 0) errors.push('ราคาไม่ถูกต้อง');
-        if (imageUrl && !validateImageUrl(imageUrl)) errors.push('รูปแบบ URL รูปภาพไม่ถูกต้อง');
-        if (category && !shopData.categories.some(cat => cat.name === category)) errors.push('หมวดหมู่ที่เลือกไม่มีอยู่จริง');
-
-        const productIndex = shopData.products.findIndex(p => p.id === id);
-        if (productIndex === -1) {
-            console.error(`Admin Error: Product ID ${id} not found for editing.`);
-            throw new Error('ไม่พบสินค้าที่ต้องการแก้ไข');
-        }
-
-        const itemsToAdd = stockItemsToAdd ? stockItemsToAdd.split('\n').map(line => line.trim()).filter(line => line.length > 0) : [];
-        console.log(`Parsed items to add for product ${id}: ${itemsToAdd.length}`);
-
-         if (errors.length > 0) {
-             console.log(`Validation errors for editing product ${id}:`, errors);
-             throw new Error(errors.join(', '));
-         }
-
-        const currentProduct = shopData.products[productIndex];
-        // --- SAFETY CHECK --- Ensure stockItems exists and is an array
-        if (!Array.isArray(currentProduct.stockItems)) {
-            console.warn(`Product ${id} stockItems was not an array, initializing.`);
-            currentProduct.stockItems = [];
-        }
-        // Add new items to the END of the existing stock
-        const updatedStockItems = [...currentProduct.stockItems, ...itemsToAdd];
-
-        // Update product fields
-        currentProduct.name = name.trim();
-        currentProduct.price = parsedPrice;
-        currentProduct.category = category;
-        currentProduct.description = description ? description.trim() : '';
-        currentProduct.language = language ? language.trim() : '';
-        currentProduct.version = version ? version.trim() : '';
-        currentProduct.imageUrl = imageUrl.trim();
-        currentProduct.stockItems = updatedStockItems;
-        currentProduct.stock = updatedStockItems.length; // Update stock count
-        currentProduct.updatedAt = new Date().toISOString();
-
-        console.log(`Admin: Product data prepared for saving. ID: ${id}, Name: ${currentProduct.name}, Stock: ${currentProduct.stock}`);
-        saveShopData(); // Save the updated shop data
-        successMsg = `แก้ไขสินค้า "${currentProduct.name}" สำเร็จ. เพิ่มสต็อก ${itemsToAdd.length} ชิ้น. รวม ${currentProduct.stock} ชิ้น.`;
-        console.log(`Admin: ${successMsg} (ID: ${id})`);
-        res.redirect(`/admin/products?message=${encodeURIComponent(successMsg)}`); // Redirect on success
-    } catch (error) {
-        console.error(`Error editing product ${id}:`, error);
-        errorMsg = `ผิดพลาดในการแก้ไข: ${error.message}`;
-        res.redirect(`/admin/products?error=${encodeURIComponent(errorMsg)}`); // Redirect on error
-    }
-});
-app.post('/admin/products/stock/delete/:productId/:itemIndex', (req, res) => {
-    let errorMsg = '', successMsg = '';
-    try {
-        const { productId, itemIndex } = req.params;
-        const index = parseInt(itemIndex, 10);
-
-        const productIndex = shopData.products.findIndex(p => p.id === productId);
-        if (productIndex === -1) throw new Error('ไม่พบสินค้า');
-
-        const product = shopData.products[productIndex];
-         if (!Array.isArray(product.stockItems)) product.stockItems = [];
-
-        if (isNaN(index) || index < 0 || index >= product.stockItems.length) {
-            throw new Error('ลำดับสต็อกไม่ถูกต้อง หรือไม่มีอยู่');
-        }
-
-        const removedItem = product.stockItems.splice(index, 1)[0];
-        product.stock = product.stockItems.length; // Update count
-        product.updatedAt = new Date().toISOString(); // Mark update
-        saveShopData();
-
-        successMsg = `ลบสต็อกลำดับที่ ${index + 1} ("${String(removedItem).substring(0, 15)}...") จากสินค้า ${product.name} สำเร็จ`;
-        console.log(`Admin: ${successMsg}`);
-        res.redirect(`/admin/products?message=${encodeURIComponent(successMsg)}`);
-    } catch (error) {
-        console.error(`Error deleting stock item for product ${req.params.productId}:`, error);
-         errorMsg = `ผิดพลาด: ${error.message}`;
-         res.redirect(`/admin/products?error=${encodeURIComponent(errorMsg)}`);
-    }
-});
-app.post('/admin/products/delete/:id', (req, res) => {
-     let errorMsg = '', successMsg = '';
     try {
         const { id } = req.params;
+        const { name, price, category, description, language, version, imageUrl, downloadUrlsText } = req.body;
+        if (!name || !price || !category || !imageUrl || !downloadUrlsText) return res.status(400).send('Missing required fields.');
+        if (isNaN(parseFloat(price)) || parseFloat(price) < 0) return res.status(400).send('Invalid price.');
+        if (!validateImageUrl(imageUrl)) return res.status(400).send('Invalid image URL format (Need https://... or data:image/...).');
+        if (!shopData.categories.some(cat => cat.name === category)) return res.status(400).send('Selected category does not exist.');
+        const downloadUrls = downloadUrlsText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+        if (downloadUrls.length === 0) return res.status(400).send('Download Info cannot be empty. Each line represents one stock item.');
         const productIndex = shopData.products.findIndex(p => p.id === id);
-        if (productIndex === -1) throw new Error('ไม่พบสินค้าที่ต้องการลบ');
-
-        const productName = shopData.products[productIndex].name;
-        shopData.products.splice(productIndex, 1); // Remove the product
-
+        if (productIndex === -1) return res.status(404).send('Product not found.');
+        shopData.products[productIndex] = {
+            ...shopData.products[productIndex],
+            name: name.trim(), price: parseFloat(price), category: category,
+            description: description ? description.trim() : '', language: language ? language.trim() : '',
+            version: version ? version.trim() : '', imageUrl: imageUrl.trim(), downloadUrls: downloadUrls,
+            updatedAt: new Date().toISOString()
+        };
+        delete shopData.products[productIndex].stock; // Clean legacy field
+        delete shopData.products[productIndex].downloadUrl; // Clean legacy field
         saveShopData();
-        successMsg = `ลบสินค้า "${productName}" (ID: ${id}) เรียบร้อยแล้ว.`;
-        console.log(`Admin: ${successMsg}`);
-        res.redirect(`/admin/products?message=${encodeURIComponent(successMsg)}`);
-    } catch (error) {
-        console.error(`Error deleting product ${req.params.id}:`, error);
-        errorMsg = `ผิดพลาด: ${error.message}`;
-        res.redirect(`/admin/products?error=${encodeURIComponent(errorMsg)}`);
-    }
+        console.log(`Admin: Product edited - ${shopData.products[productIndex].name} (ID: ${id}), Stock: ${shopData.products[productIndex].downloadUrls.length}`);
+        res.redirect('/admin/products');
+    } catch (error) { console.error(`Error editing product ${req.params.id} via admin:`, error); res.status(500).send("Error processing request."); }
 });
-// --- End Product Routes ---
 
-// --- Category Routes ---
-app.get('/admin/categories', (req, res) => {
+// --- POST /admin/products/delete/:id ---
+app.post('/admin/products/delete/:id', (req, res) => {
     try {
+        const { id } = req.params;
+        const initialLength = shopData.products.length;
+        shopData.products = shopData.products.filter(p => p.id !== id);
+        if (shopData.products.length < initialLength) {
+            saveShopData();
+            console.log(`Admin: Product deleted - ID ${id}`);
+        } else return res.status(404).send('Product not found.');
+        res.redirect('/admin/products');
+    } catch (error) { console.error(`Error deleting product ${req.params.id} via admin:`, error); res.status(500).send("Error processing request."); }
+});
+
+// --- GET /admin/categories ---
+app.get('/admin/categories', (req, res) => {
+     try {
         const categoriesWithCount = shopData.categories.map(cat => ({
             ...cat,
             productCount: shopData.products.filter(p => p.category === cat.name).length
         }));
-        let message = req.query.message;
-        let error = req.query.error;
-        const categoryName = req.query.categoryName;
-
-        // Custom error message for delete failure
-        if (error === 'delete_failed_in_use') {
-            const catData = categoriesWithCount.find(c => c.name === decodeURIComponent(categoryName || ''));
-            error = `ลบไม่สำเร็จ! ไม่สามารถลบหมวดหมู่ "${decodeURIComponent(categoryName || '')}" ได้เนื่องจากมีสินค้า (${catData?.productCount || '?'}) ใช้งานอยู่ กรุณาย้ายสินค้าออกก่อน`;
-        }
-        res.render('categories', { categories: categoriesWithCount, message, error, pageTitle: 'Categories' });
-    } catch (error) {
-        console.error("Error rendering categories page:", error);
-        res.status(500).send("Error loading category data.");
-    }
+        const error = req.query.error; // For delete error message
+        res.render('categories', { categories: categoriesWithCount, error: error });
+     } catch (error) {
+         console.error("Error rendering categories page:", error);
+         res.status(500).send("Error loading category data.");
+     }
 });
+
+// --- POST /admin/categories/add ---
 app.post('/admin/categories/add', (req, res) => {
-    let errorMsg = '', successMsg = '';
     try {
         const { name, imageUrl, description } = req.body;
-        if (!name || !name.trim()) throw new Error('ชื่อหมวดหมู่ห้ามว่าง');
+        if (!name || !name.trim()) return res.status(400).send('Category name required.');
         const trimmedName = name.trim();
-        if (shopData.categories.some(cat => cat.name.toLowerCase() === trimmedName.toLowerCase())) {
-            throw new Error(`หมวดหมู่ "${trimmedName}" มีอยู่แล้ว`);
-        }
-        if (imageUrl && !validateImageUrl(imageUrl)) throw new Error('รูปแบบ URL รูปภาพไม่ถูกต้อง');
-
-        shopData.categories.push({
-            name: trimmedName,
-            imageUrl: imageUrl ? imageUrl.trim() : '',
-            description: description ? description.trim() : ''
-        });
-        shopData.categories.sort((a, b) => a.name.localeCompare(b.name)); // Keep sorted
+        if (shopData.categories.some(cat => cat.name.toLowerCase() === trimmedName.toLowerCase())) return res.status(400).send(`Category "${trimmedName}" exists.`);
+        if (imageUrl && !validateImageUrl(imageUrl)) return res.status(400).send('Invalid image URL format.');
+        shopData.categories.push({ name: trimmedName, imageUrl: imageUrl ? imageUrl.trim() : '', description: description ? description.trim() : '' });
+        shopData.categories.sort((a, b) => a.name.localeCompare(b.name));
         saveShopData();
-        successMsg = `เพิ่มหมวดหมู่ "${trimmedName}" สำเร็จ.`;
-        console.log(`Admin: ${successMsg}`);
-        res.redirect(`/admin/categories?message=${encodeURIComponent(successMsg)}`);
-    } catch (error) {
-        console.error("Error adding category:", error);
-        errorMsg = `ผิดพลาด: ${error.message}`;
-        res.redirect(`/admin/categories?error=${encodeURIComponent(errorMsg)}`);
-    }
+        console.log(`Admin: Category added - ${trimmedName}`);
+        res.redirect('/admin/categories');
+    } catch (error) { console.error("Error adding category:", error); res.status(500).send("Error."); }
 });
+
+// --- POST /admin/categories/edit ---
 app.post('/admin/categories/edit', (req, res) => {
-     let errorMsg = '', successMsg = '';
     try {
         const { originalName, newName, imageUrl, description } = req.body;
-        if (!originalName) throw new Error('ไม่พบชื่อหมวดหมู่เดิม');
-        if (!newName || !newName.trim()) throw new Error('ชื่อใหม่ห้ามว่าง');
+        if (!originalName || !newName || !newName.trim()) return res.status(400).send('Names required.');
         const trimmedNewName = newName.trim();
-
-        // Check for name collision only if the name actually changed (case-insensitive)
-        if (trimmedNewName.toLowerCase() !== originalName.toLowerCase() &&
-            shopData.categories.some(cat => cat.name.toLowerCase() === trimmedNewName.toLowerCase())) {
-            throw new Error(`ชื่อหมวดหมู่ใหม่ "${trimmedNewName}" ซ้ำกับหมวดหมู่อื่น`);
-        }
-        if (imageUrl && !validateImageUrl(imageUrl)) throw new Error('รูปแบบ URL รูปภาพไม่ถูกต้อง');
-
+        if (trimmedNewName.toLowerCase() !== originalName.toLowerCase() && shopData.categories.some(cat => cat.name.toLowerCase() === trimmedNewName.toLowerCase())) return res.status(400).send(`Name "${trimmedNewName}" exists.`);
+        if (imageUrl && !validateImageUrl(imageUrl)) return res.status(400).send('Invalid image URL format.');
         const categoryIndex = shopData.categories.findIndex(cat => cat.name === originalName);
-        if (categoryIndex === -1) throw new Error('ไม่พบหมวดหมู่เดิมที่ต้องการแก้ไข');
-
-        const oldName = shopData.categories[categoryIndex].name; // Store old name for product update check
-        shopData.categories[categoryIndex].name = trimmedNewName;
-        shopData.categories[categoryIndex].imageUrl = imageUrl ? imageUrl.trim() : (shopData.categories[categoryIndex].imageUrl || ''); // Keep old if new is empty
-        shopData.categories[categoryIndex].description = description ? description.trim() : (shopData.categories[categoryIndex].description || ''); // Keep old if new is empty
-
-        let productsUpdated = 0;
-        // Update products only if the name actually changed
+        if (categoryIndex === -1) return res.status(404).send('Category not found.');
+        const oldName = shopData.categories[categoryIndex].name;
+        shopData.categories[categoryIndex] = { name: trimmedNewName, imageUrl: imageUrl ? imageUrl.trim() : (shopData.categories[categoryIndex].imageUrl || ''), description: description ? description.trim() : (shopData.categories[categoryIndex].description || '') };
         if (trimmedNewName !== oldName) {
-            shopData.products.forEach(product => {
-                if (product.category === oldName) {
-                    product.category = trimmedNewName;
-                    product.updatedAt = new Date().toISOString(); // Mark product as updated
-                    productsUpdated++;
-                }
-            });
-             shopData.categories.sort((a, b) => a.name.localeCompare(b.name)); // Re-sort if name changed
-             console.log(`Admin: Renamed category "${oldName}" to "${trimmedNewName}", updated ${productsUpdated} products.`);
-        } else {
-             console.log(`Admin: Edited details for category "${trimmedNewName}" (name unchanged).`);
+             let productsUpdated = 0;
+             shopData.products.forEach(product => { if (product.category === oldName) { product.category = trimmedNewName; product.updatedAt = new Date().toISOString(); productsUpdated++; } });
+             console.log(`Admin: Updated ${productsUpdated} products from category "${oldName}" to "${trimmedNewName}"`);
         }
-        saveShopData(); // Save potentially updated products and categories
-        successMsg = `แก้ไขหมวดหมู่: "${oldName}" -> "${trimmedNewName}" สำเร็จ.${productsUpdated > 0 ? ' อัปเดต ' + productsUpdated + ' สินค้า.' : ''}`;
-        res.redirect(`/admin/categories?message=${encodeURIComponent(successMsg)}`);
-    } catch (error) {
-        console.error("Error editing category:", error);
-         errorMsg = `ผิดพลาด: ${error.message}`;
-        res.redirect(`/admin/categories?error=${encodeURIComponent(errorMsg)}`);
-    }
+        shopData.categories.sort((a, b) => a.name.localeCompare(b.name));
+        saveShopData();
+        console.log(`Admin: Category edited - "${oldName}" to "${trimmedNewName}"`);
+        res.redirect('/admin/categories');
+    } catch (error) { console.error("Error editing category:", error); res.status(500).send("Error."); }
 });
+
+// --- POST /admin/categories/delete/:name ---
 app.post('/admin/categories/delete/:name', (req, res) => {
-     let errorMsg = '', successMsg = '';
     try {
-        // Decode the name from the URL parameter
         const decodedName = decodeURIComponent(req.params.name);
         const productsInCategory = shopData.products.filter(p => p.category === decodedName);
         if (productsInCategory.length > 0) {
-            console.warn(`Admin: Attempted delete category "${decodedName}" with ${productsInCategory.length} products.`);
-            // Redirect back with a specific error code and the category name for the message
-            return res.redirect(`/admin/categories?error=delete_failed_in_use&categoryName=${encodeURIComponent(decodedName)}`);
+            console.warn(`Admin: Cannot delete category "${decodedName}" with ${productsInCategory.length} products.`);
+            return res.redirect('/admin/categories?error=delete_failed_in_use'); // Redirect with error flag
         }
-
         const initialLength = shopData.categories.length;
         shopData.categories = shopData.categories.filter(cat => cat.name !== decodedName);
-
         if (shopData.categories.length < initialLength) {
             saveShopData();
-            successMsg = `ลบหมวดหมู่ "${decodedName}" สำเร็จ.`;
-            console.log(`Admin: ${successMsg}`);
-            res.redirect(`/admin/categories?message=${encodeURIComponent(successMsg)}`);
-        } else {
-             // Should not happen if validation passed, but good safety check
-             throw new Error('ไม่พบหมวดหมู่ที่ต้องการลบ');
-        }
-    } catch (error) {
-        console.error(`Error deleting category ${decodeURIComponent(req.params.name)}:`, error);
-         errorMsg = `ผิดพลาด: ${error.message}`;
-         // Redirect back with the error message
-         res.redirect(`/admin/categories?error=${encodeURIComponent(errorMsg)}`);
-    }
+            console.log(`Admin: Category deleted - ${decodedName}`);
+        } else return res.status(404).send('Category not found.');
+        res.redirect('/admin/categories');
+    } catch (error) { console.error(`Error deleting category ${decodeURIComponent(req.params.name)}:`, error); res.status(500).send("Error."); }
 });
-// --- End Category Routes ---
 
-// --- Order Routes ---
+// --- GET /admin/orders ---
 app.get('/admin/orders', (req, res) => {
-    try {
+     try {
         const sortedOrders = [...shopData.orders]
-            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-        res.render('orders', {
-             orders: sortedOrders,
-             message: req.query.message,
-             error: req.query.error,
-             pageTitle: 'Orders'
-        });
-    } catch (error) {
-        console.error("Error rendering orders page:", error);
-        res.status(500).send("Error loading order data.");
-    }
+                             .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        res.render('orders', { orders: sortedOrders });
+     } catch (error) {
+         console.error("Error rendering orders page:", error);
+         res.status(500).send("Error loading order data.");
+     }
 });
+
+// --- POST /admin/orders/status/:id ---
 app.post('/admin/orders/status/:id', (req, res) => {
-     let errorMsg = '', successMsg = '';
     try {
         const { id } = req.params;
         const { status } = req.body;
         const validStatuses = ['pending', 'completed', 'cancelled', 'processing', 'shipped', 'refunded'];
-        if (!status || !validStatuses.includes(status)) throw new Error('สถานะไม่ถูกต้อง');
-
+        if (!validStatuses.includes(status)) return res.status(400).send('Invalid status.');
         const orderIndex = shopData.orders.findIndex(o => o.id === id);
-        if (orderIndex === -1) throw new Error('ไม่พบคำสั่งซื้อ');
-
-        if (shopData.orders[orderIndex].status !== status) {
-            shopData.orders[orderIndex].status = status;
-            shopData.orders[orderIndex].updatedAt = new Date().toISOString(); // Update timestamp
-            saveShopData();
-            successMsg = `อัปเดตสถานะคำสั่งซื้อ ${id} เป็น ${status} สำเร็จ`;
-            console.log(`Admin: ${successMsg}`);
-            res.redirect(`/admin/orders?message=${encodeURIComponent(successMsg)}#order-${id}`); // Redirect back with hash
-        } else {
-             res.redirect(`/admin/orders#order-${id}`); // Redirect back even if status didn't change
-        }
-    } catch (error) {
-        console.error(`Error updating order status ${req.params.id}:`, error);
-        errorMsg = `ผิดพลาด: ${error.message}`;
-        res.redirect(`/admin/orders?error=${encodeURIComponent(errorMsg)}`);
-    }
+        if (orderIndex !== -1) {
+             if (shopData.orders[orderIndex].status !== status) {
+                 shopData.orders[orderIndex].status = status;
+                 shopData.orders[orderIndex].updatedAt = new Date().toISOString();
+                 saveShopData();
+                 console.log(`Admin: Order status updated - ID ${id} set to ${status}`);
+             }
+             res.redirect('/admin/orders');
+        } else res.status(404).send('Order not found.');
+    } catch (error) { console.error(`Error updating order status ${req.params.id}:`, error); res.status(500).send("Error."); }
 });
-app.post('/admin/orders/delete/:id', (req, res) => {
-    let errorMsg = '', successMsg = '';
-    try {
-        const { id } = req.params;
-        const initialLength = shopData.orders.length;
-        shopData.orders = shopData.orders.filter(o => o.id !== id); // Filter out the order
 
-        if (shopData.orders.length < initialLength) {
-            saveShopData();
-            successMsg = `ลบคำสั่งซื้อ ${id} สำเร็จ.`;
-            console.log(`Admin: ${successMsg}`);
-            res.redirect(`/admin/orders?message=${encodeURIComponent(successMsg)}`);
-        } else {
-            throw new Error('ไม่พบคำสั่งซื้อที่ต้องการลบ.');
-        }
-    } catch (error) {
-        console.error(`Error deleting order ${req.params.id}:`, error);
-        errorMsg = `ผิดพลาด: ${error.message}`;
-        res.redirect(`/admin/orders?error=${encodeURIComponent(errorMsg)}`);
-    }
-});
-// --- End Order Routes ---
-
-// --- Redemption Code Routes ---
+// --- GET /admin/codes ---
 app.get('/admin/codes', (req, res) => {
-    try {
-        // Sort codes alphabetically for display
+     try {
         const sortedCodes = [...validRedemptionCodes].sort();
-        res.render('codes', {
-             codes: sortedCodes,
-             message: req.query.message,
-             error: req.query.error,
-             pageTitle: 'Redemption Codes'
-         });
-    } catch (error) {
-        console.error("Error rendering codes page:", error);
-        res.status(500).send("Error loading codes data.");
-    }
+        res.render('codes', { codes: sortedCodes, message: req.query.message });
+     } catch (error) { console.error("Error rendering codes page:", error); res.status(500).send("Error."); }
 });
+
+// --- POST /admin/codes/add ---
 app.post('/admin/codes/add', (req, res) => {
     try {
         let { code, count } = req.body;
-        count = parseInt(count, 10) || 0;
+        count = parseInt(count, 10) || 1;
         const CODE_LENGTH = 32;
-        const CODE_PATTERN = /^[A-Z0-9]{32}$/;
         let addedCount = 0;
-        let skippedCount = 0;
-        let message = '', error = '';
-        const addedCodesList = []; // Keep track of actually added/generated codes
+        let failedCodes = [];
+        let message = '';
 
-        // 1. Handle manually entered code
         if (code && code.trim()) {
-            code = code.trim().toUpperCase();
-            if (code.length !== CODE_LENGTH || !CODE_PATTERN.test(code)) {
-                error = `ผิดพลาด: โค้ดที่ใส่เองต้องเป็น ${CODE_LENGTH} ตัวอักษร (A-Z, 0-9).`;
-            } else if (validRedemptionCodes.some(c => c.toUpperCase() === code)) {
-                error = `ผิดพลาด: โค้ด "${code}" มีอยู่แล้ว`;
-            } else {
-                validRedemptionCodes.push(code);
-                addedCodesList.push(code);
-                addedCount++;
-            }
-        }
-        // 2. Handle generation if count > 0 AND no manual code was added/valid
-        else if (count > 0 && addedCount === 0) {
-            if (count > 1000) { // Limit generation count
-                 console.warn("Limiting code generation to 1000 per request.");
-                 count = 1000;
-            }
-
-            let generatedCodes = new Set(); // Use Set to automatically handle duplicates during generation
-            let existingCodesUpper = new Set(validRedemptionCodes.map(c => c.toUpperCase())); // Set of existing codes for quick lookup
-
-             // Generate codes until the desired count is reached or max attempts fail
-             while(generatedCodes.size < count) {
-                 let attempts = 0;
-                 let generatedCode;
-                 const maxAttempts = 30; // Max attempts to generate a unique code before giving up
-
-                 do {
-                     // Generate 16 random bytes -> 32 hex characters
-                     generatedCode = crypto.randomBytes(16).toString('hex').toUpperCase();
-                     attempts++;
-                 } while ((existingCodesUpper.has(generatedCode) || generatedCodes.has(generatedCode)) && attempts < maxAttempts); // Check against existing AND newly generated
-
-                 if (attempts < maxAttempts) {
-                      generatedCodes.add(generatedCode); // Add unique code to the set
-                  } else {
-                      console.warn(`Failed to generate unique redemption code after ${maxAttempts} attempts. Stopping generation. Generated: ${generatedCodes.size}/${count}`);
-                      skippedCount = count - generatedCodes.size; // Record how many were skipped
-                      break; // Stop trying if it's too hard to find unique codes
-                  }
-             }
-             // Add the successfully generated unique codes to the main list
-             if (generatedCodes.size > 0) {
-                 const codesToAdd = Array.from(generatedCodes);
-                 validRedemptionCodes.push(...codesToAdd);
-                 addedCodesList.push(...codesToAdd); // Keep track for message
-                 addedCount += generatedCodes.size;
-             }
-        } else if (addedCount === 0 && count <= 0) {
-             // No manual code, no valid count
-             error = "กรุณาใส่โค้ดเอง หรือระบุจำนวนที่ต้องการสร้าง (> 0)";
-        }
-
-        // Save and redirect based on outcome
-        if (addedCount > 0) {
-            validRedemptionCodes.sort(); // Keep the list sorted
-            saveValidRedemptionCodes();
-            console.log(`Admin: Added/Generated ${addedCount} redemption code(s).`);
-            message = `เพิ่ม/สร้างโค้ดสำเร็จ ${addedCount} โค้ด.`;
-            if (skippedCount > 0) message += ` ข้าม ${skippedCount} โค้ด (อาจเกิดจากชนกัน).`;
-            if (error) message += ` หมายเหตุ: ${error}`; // Append any error from manual validation
-            res.redirect(`/admin/codes?message=${encodeURIComponent(message)}`);
+            code = code.trim().toUpperCase(); // Standardize to uppercase
+            if (code.length !== CODE_LENGTH || !/^[A-Z0-9]+$/.test(code)) message = `Error: Manual code must be ${CODE_LENGTH} uppercase letters/numbers.`;
+            else if (validRedemptionCodes.includes(code)) message = `Error: Code "${code}" exists.`;
+            else { validRedemptionCodes.push(code); addedCount++; }
         } else {
-             // Only errors occurred, or no action taken
-             if (!error) error = "ไม่ได้เพิ่มโค้ด (โปรดตรวจสอบข้อมูล)";
-             res.redirect(`/admin/codes?error=${encodeURIComponent(error)}`);
+            if (count > 1000) count = 1000;
+            if (count < 1) message = 'Error: Specify code or count (1-1000).';
+            else {
+                for (let i = 0; i < count; i++) {
+                    let attempts = 0, generatedCode;
+                    do {
+                         generatedCode = crypto.randomBytes(16).toString('hex').toUpperCase(); attempts++;
+                    } while (validRedemptionCodes.includes(generatedCode) && attempts < 10);
+                    if (attempts < 10) { validRedemptionCodes.push(generatedCode); addedCount++; }
+                    else { console.warn("Failed unique code generation attempt."); failedCodes.push(`Attempt ${i+1}`); }
+                }
+            }
         }
-    } catch (err) {
-        console.error("Error adding/generating redemption codes:", err);
-        res.redirect(`/admin/codes?error=${encodeURIComponent('ผิดพลาดระบบ: ' + err.message)}`);
-    }
+        if (addedCount > 0) {
+             validRedemptionCodes.sort();
+             saveValidRedemptionCodes();
+             console.log(`Admin: Added ${addedCount} redemption code(s).`);
+             message = `Successfully added ${addedCount} code(s).`;
+             if (failedCodes.length > 0) message += ` Failed to generate ${failedCodes.length}.`;
+        } else if (!message) message = "No codes added. Provide valid code or count.";
+        res.redirect(`/admin/codes?message=${encodeURIComponent(message)}`);
+    } catch (error) { console.error("Error adding codes:", error); res.status(500).send("Error."); }
 });
+
+// --- POST /admin/codes/delete/:code ---
 app.post('/admin/codes/delete/:code', (req, res) => {
     try {
-        const codeToDelete = req.params.code?.toUpperCase();
-        // Basic validation of the code format from the URL
-        if (!codeToDelete || !/^[A-Z0-9]{32}$/.test(codeToDelete)) {
-             throw new Error('รูปแบบโค้ดใน URL ไม่ถูกต้อง');
-        }
+        const codeToDelete = req.params.code.toUpperCase(); // Match case used in add
         const initialLength = validRedemptionCodes.length;
-        // Filter out the code (case-insensitive comparison)
-        validRedemptionCodes = validRedemptionCodes.filter(c => c.toUpperCase() !== codeToDelete);
-
+        validRedemptionCodes = validRedemptionCodes.filter(c => c !== codeToDelete);
         if (validRedemptionCodes.length < initialLength) {
             saveValidRedemptionCodes();
             console.log(`Admin: Redemption code deleted - ${codeToDelete}`);
-            res.redirect('/admin/codes?message=' + encodeURIComponent(`ลบโค้ด "${codeToDelete}" สำเร็จ.`));
-        } else {
-             throw new Error(`ไม่พบโค้ด "${codeToDelete}" ที่ต้องการลบ`);
-        }
-    } catch (error) {
-        console.error(`Error deleting redemption code ${req.params.code}:`, error);
-        res.redirect(`/admin/codes?error=${encodeURIComponent('ผิดพลาด: ' + error.message)}`);
-    }
+             res.redirect('/admin/codes?message=' + encodeURIComponent(`Code "${codeToDelete}" deleted.`));
+        } else res.redirect('/admin/codes?message=' + encodeURIComponent(`Error: Code "${codeToDelete}" not found.`));
+    } catch (error) { console.error(`Error deleting code ${req.params.code}:`, error); res.status(500).send("Error."); }
 });
-// --- End Redemption Code Routes ---
 
-// --- Discount Code Routes ---
-app.get('/admin/discounts', (req, res) => {
-     try {
-        // Sort by creation date, newest first
-        const sortedDiscounts = [...discountCodes]
-            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-        res.render('discounts', {
-             discounts: sortedDiscounts,
-             message: req.query.message,
-             error: req.query.error,
-             pageTitle: 'Discount Codes'
-        });
-     } catch (error) {
-         console.error("Error rendering discounts page:", error);
-         res.status(500).send("Error loading discount code data.");
-     }
-});
-app.post('/admin/discounts/add', (req, res) => {
+// --- NEW: Admin Settings Routes ---
+app.get('/admin/settings', (req, res) => {
     try {
-        let { code, type, value, maxUses, minPurchase, expiresAt } = req.body;
-        let errors = [];
-
-        // --- Validation ---
-        code = code ? code.trim().toUpperCase() : '';
-        if (!code || !/^[A-Z0-9]{3,20}$/.test(code)) { // Allow 3 to 20 chars for code
-            errors.push('รูปแบบโค้ดไม่ถูกต้อง (3-20 ตัว A-Z, 0-9)');
-        } else if (discountCodes.some(dc => dc.code === code)) {
-            errors.push(`โค้ดส่วนลด "${code}" มีอยู่แล้ว`);
-        }
-        if (type !== 'percentage' && type !== 'fixed') {
-             errors.push('ประเภทส่วนลดไม่ถูกต้อง (percentage หรือ fixed)');
-        }
-
-        value = parseFloat(value);
-        if (isNaN(value) || value <= 0) errors.push('มูลค่าส่วนลดต้องเป็นเลขบวก');
-        else if (type === 'percentage' && value > 100) errors.push('ส่วนลดเปอร์เซ็นต์ห้ามเกิน 100%');
-
-        // Handle maxUses: null means infinity, otherwise must be >= 1
-        maxUses = maxUses ? (parseInt(maxUses, 10) || null) : null;
-        if (maxUses !== null && maxUses < 1) errors.push('จำนวนครั้งสูงสุดต้อง >= 1 (หรือเว้นว่างสำหรับไม่จำกัด)');
-
-        minPurchase = minPurchase ? (parseFloat(minPurchase) || 0) : 0;
-        if (minPurchase < 0) errors.push('ยอดซื้อขั้นต่ำห้ามติดลบ');
-
-        // Handle expiresAt: Store as ISO string (end of day in local timezone) or null
-        let expiryDate = null;
-        if (expiresAt) {
-            try {
-                 const d = new Date(expiresAt); // Parses based on local timezone if no timezone specified
-                 if (isNaN(d.getTime())) throw new Error('Invalid date value');
-                 // Set time to end of the selected day (23:59:59.999) in local timezone
-                 const localEndDate = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-                 expiryDate = localEndDate.toISOString(); // Store as UTC ISO string
-                 console.log(`Setting discount expiry for ${code} to ${expiryDate} (End of Day in local timezone, derived from input ${expiresAt})`);
-            } catch {
-                errors.push('รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)');
-            }
-        }
-
-        if (errors.length > 0) {
-             // Redirect back with errors
-             return res.redirect(`/admin/discounts?error=${encodeURIComponent(errors.join(', '))}`);
-        }
-
-        // --- Create and Save ---
-        const newDiscount = {
-             id: `DC-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-             code: code,
-             type: type,
-             value: value,
-             maxUses: maxUses, // null or number
-             uses: 0,
-             minPurchase: minPurchase,
-             expiresAt: expiryDate, // null or ISO string
-             createdAt: new Date().toISOString()
-        };
-
-        discountCodes.push(newDiscount);
-        saveDiscountCodes();
-        console.log(`Admin: Discount code added - ${newDiscount.code} (ID: ${newDiscount.id})`);
-        let message = `เพิ่มโค้ดส่วนลด "${newDiscount.code}" สำเร็จ.`;
-        res.redirect(`/admin/discounts?message=${encodeURIComponent(message)}`);
-
-    } catch (err) {
-        console.error("Error adding discount code:", err);
-        res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาดระบบ: ' + err.message)}`);
+        // Pass the current runtimeConfig and any message from query params
+        res.render('settings', { config: runtimeConfig, message: req.query.message });
+    } catch (error) {
+        console.error("Error rendering settings page:", error);
+        res.status(500).send("Error loading settings page.");
     }
 });
-app.post('/admin/discounts/edit/:id', (req, res) => {
-     try {
-         const { id } = req.params;
-         let { code, type, value, maxUses, minPurchase, expiresAt } = req.body;
-         let errors = [];
 
-         const discountIndex = discountCodes.findIndex(dc => dc.id === id);
-         if (discountIndex === -1) {
-             return res.status(404).send('ไม่พบโค้ดส่วนลดที่ต้องการแก้ไข');
+app.post('/admin/settings', (req, res) => {
+    try {
+        const newConfig = req.body;
+        let message = "Settings updated successfully!";
+        let errorOccurred = false;
+
+        // --- Basic Validation ---
+        if (!newConfig.verifyToken || newConfig.verifyToken.length < 5) {
+            message = "Error: Verify Token seems too short."; errorOccurred = true;
+        }
+        if (!newConfig.pageAccessToken || newConfig.pageAccessToken.length < 50) {
+             message = "Error: Page Access Token seems too short."; errorOccurred = true;
+        }
+        if (newConfig.walletImage && !validateImageUrl(newConfig.walletImage)) {
+             message = "Error: Invalid Wallet Image URL format."; errorOccurred = true;
+        }
+         if (newConfig.welcomeGif && !validateImageUrl(newConfig.welcomeGif)) {
+             message = "Error: Invalid Welcome GIF URL format."; errorOccurred = true;
+        }
+         if (newConfig.bankImage && !validateImageUrl(newConfig.bankImage)) {
+             message = "Error: Invalid Bank Image URL format."; errorOccurred = true;
+        }
+         if (newConfig.codeRedemptionImage && !validateImageUrl(newConfig.codeRedemptionImage)) {
+             message = "Error: Invalid Code Redemption Image URL format."; errorOccurred = true;
+        }
+        if (newConfig.xnclyClientIdSecret && !newConfig.xnclyClientIdSecret.includes(':')) {
+             message = "Error: Xncly ClientID:Secret format is incorrect (should contain a colon)."; errorOccurred = true;
+        }
+         if (newConfig.xnclyCheckUrl && !isValidUrl(newConfig.xnclyCheckUrl)) {
+             message = "Error: Xncly Check URL is invalid."; errorOccurred = true;
+        }
+         if (!newConfig.walletPhone || !/^\d{9,10}$/.test(newConfig.walletPhone)) {
+            message = "Error: Invalid Wallet Phone Number format (should be 9-10 digits)."; errorOccurred = true;
+         }
+         if (!newConfig.bankAccountDetails || newConfig.bankAccountDetails.length < 10) {
+            message = "Error: Bank Account Details seem too short."; errorOccurred = true;
          }
 
-         // --- Validation (similar to add, but check collision against others) ---
-         code = code ? code.trim().toUpperCase() : '';
-         if (!code || !/^[A-Z0-9]{3,20}$/.test(code)) {
-            errors.push('รูปแบบโค้ดไม่ถูกต้อง (3-20 ตัว A-Z, 0-9)');
-         } else if (discountCodes.some(dc => dc.code === code && dc.id !== id)) { // Check collision excluding self
-             errors.push(`โค้ดส่วนลด "${code}" ซ้ำกับโค้ดอื่น`);
-         }
-         if (type !== 'percentage' && type !== 'fixed') {
-             errors.push('ประเภทส่วนลดไม่ถูกต้อง');
-         }
 
-         value = parseFloat(value);
-         if (isNaN(value) || value <= 0) errors.push('มูลค่าส่วนลดต้องเป็นเลขบวก');
-         else if (type === 'percentage' && value > 100) errors.push('ส่วนลดเปอร์เซ็นต์ห้ามเกิน 100%');
+        if (errorOccurred) {
+            // Don't save, redirect back with error message and original config
+             return res.render('settings', { config: runtimeConfig, message: message, isError: true });
+        }
 
-          maxUses = maxUses ? (parseInt(maxUses, 10) || null) : null;
-          if (maxUses !== null && maxUses < 1) errors.push('จำนวนครั้งสูงสุดต้อง >= 1 (หรือเว้นว่าง)');
+        // Update runtimeConfig object
+        runtimeConfig.walletPhone = newConfig.walletPhone.trim();
+        runtimeConfig.walletImage = newConfig.walletImage.trim();
+        runtimeConfig.welcomeGif = newConfig.welcomeGif.trim();
+        runtimeConfig.bankAccountDetails = newConfig.bankAccountDetails.trim();
+        runtimeConfig.bankImage = newConfig.bankImage.trim();
+        runtimeConfig.codeRedemptionImage = newConfig.codeRedemptionImage.trim();
+        runtimeConfig.xnclyClientIdSecret = newConfig.xnclyClientIdSecret.trim();
+        runtimeConfig.xnclyCheckUrl = newConfig.xnclyCheckUrl.trim();
+        runtimeConfig.verifyToken = newConfig.verifyToken.trim();
+        runtimeConfig.pageAccessToken = newConfig.pageAccessToken.trim();
 
-          minPurchase = minPurchase ? (parseFloat(minPurchase) || 0) : 0;
-          if (minPurchase < 0) errors.push('ยอดซื้อขั้นต่ำห้ามติดลบ');
+        // Save the updated config to file
+        const saved = saveConfig();
+        if (!saved) {
+            message = "Error saving configuration to file. Check server logs and file permissions.";
+             errorOccurred = true;
+        }
 
-         let expiryDate = null;
-          if (expiresAt) {
-             try {
-                  const d = new Date(expiresAt);
-                  if (isNaN(d.getTime())) throw new Error('Invalid date value');
-                  const localEndDate = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-                  expiryDate = localEndDate.toISOString();
-                  console.log(`Setting discount expiry for ${code} (edit) to ${expiryDate} (from input ${expiresAt})`);
-             } catch {
-                 errors.push('รูปแบบวันหมดอายุไม่ถูกต้อง (YYYY-MM-DD)');
-             }
-          }
+        // Redirect back to settings page with success or error message
+        res.redirect(`/admin/settings?message=${encodeURIComponent(message)}`);
 
-         if (errors.length > 0) {
-              return res.redirect(`/admin/discounts?error=${encodeURIComponent(errors.join(', '))}`);
-         }
-
-         // --- Update and Save ---
-         const currentDiscount = discountCodes[discountIndex];
-         const currentUses = currentDiscount.uses || 0; // Preserve current usage count
-
-          // Prevent setting maxUses lower than current uses
-          if (maxUses !== null && maxUses < currentUses) {
-              return res.redirect(`/admin/discounts?error=${encodeURIComponent(`ไม่สามารถลดจำนวนครั้งสูงสุด (${maxUses}) ให้น้อยกว่าที่ใช้ไปแล้ว (${currentUses}) สำหรับโค้ด ${currentDiscount.code}`)}`);
-          }
-
-         // Update fields
-         currentDiscount.code = code;
-         currentDiscount.type = type;
-         currentDiscount.value = value;
-         currentDiscount.maxUses = maxUses;
-         currentDiscount.minPurchase = minPurchase;
-         currentDiscount.expiresAt = expiryDate;
-         // currentDiscount.uses = currentUses; // Uses count remains unchanged by editing
-
-         saveDiscountCodes();
-         console.log(`Admin: Discount code edited - ${currentDiscount.code} (ID: ${id})`);
-         let message = `แก้ไขโค้ดส่วนลด "${currentDiscount.code}" สำเร็จ.`;
-         res.redirect(`/admin/discounts?message=${encodeURIComponent(message)}`);
-
-     } catch (err) {
-         console.error(`Error editing discount code ${req.params.id}:`, err);
-         res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาดระบบ: ' + err.message)}`);
-     }
+    } catch (error) {
+        console.error("Error processing settings update:", error);
+        res.status(500).send("Internal server error updating settings.");
+    }
 });
-app.post('/admin/discounts/delete/:id', (req, res) => {
-     try {
-         const { id } = req.params;
-         const initialLength = discountCodes.length;
-         const codeToDelete = discountCodes.find(dc => dc.id === id)?.code; // Get code for message
-
-         discountCodes = discountCodes.filter(dc => dc.id !== id); // Filter out by ID
-
-         if (discountCodes.length < initialLength) {
-             saveDiscountCodes();
-             console.log(`Admin: Discount code deleted - ID ${id} (Code: ${codeToDelete || 'N/A'})`);
-             res.redirect('/admin/discounts?message=' + encodeURIComponent(`ลบโค้ดส่วนลด "${codeToDelete || id}" สำเร็จ.`));
-         } else {
-              throw new Error(`ไม่พบโค้ดส่วนลด ID "${id}" ที่ต้องการลบ`);
-         }
-     } catch (error) {
-         console.error(`Error deleting discount code ${req.params.id}:`, error);
-         res.redirect(`/admin/discounts?error=${encodeURIComponent('ผิดพลาด: ' + error.message)}`);
-     }
-});
-// --- End Discount Code Routes ---
 
 // --- End Admin ---
 
-// --- EJS Template Creation and File Checks ---
-// Templates are included within the JS file itself for easier distribution.
+
+// --- EJS Template Creation (Ensure Directories and Add New/Updated Templates) ---
+if (!fs.existsSync(viewsDir)) fs.mkdirSync(viewsDir);
+if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir);
+
 const templates = {
-    'navbar.ejs': `
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top shadow-sm">
-  <div class="container">
-    <a class="navbar-brand" href="/admin"><i class="bi bi-shield-lock-fill"></i> Admin Panel</a>
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNavAdmin" aria-controls="navbarNavAdmin" aria-expanded="false" aria-label="Toggle navigation">
-      <span class="navbar-toggler-icon"></span>
-    </button>
-    <div class="collapse navbar-collapse" id="navbarNavAdmin">
-      <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
-        <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Dashboard') ? 'active' : '' %>" href="/admin"><i class="bi bi-speedometer2"></i> แดชบอร์ด</a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Products') ? 'active' : '' %>" href="/admin/products"><i class="bi bi-box-seam"></i> สินค้า</a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Categories') ? 'active' : '' %>" href="/admin/categories"><i class="bi bi-tags-fill"></i> หมวดหมู่</a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Orders') ? 'active' : '' %>" href="/admin/orders"><i class="bi bi-receipt-cutoff"></i> คำสั่งซื้อ</a>
-        </li>
-         <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Discount Codes') ? 'active' : '' %>" href="/admin/discounts"><i class="bi bi-percent"></i> ส่วนลด</a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Redemption Codes') ? 'active' : '' %>" href="/admin/codes"><i class="bi bi-key-fill"></i> โค้ดรับของ</a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link <%= (pageTitle === 'Settings') ? 'active' : '' %>" href="/admin/settings"><i class="bi bi-gear-wide-connected"></i> ตั้งค่า</a>
-        </li>
-      </ul>
-    </div>
-  </div>
-</nav>
-`,
+    // --- DASHBOARD (No changes needed from previous) ---
     'dashboard.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>แดชบอร์ด - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.card-icon{font-size:2.5rem}.card{transition:transform .2s ease-in-out}.card:hover{transform:translateY(-5px);box-shadow:0 4px 8px rgba(0,0,0,.1)}body{padding-top:70px;background-color:#f8f9fa}.card-footer span{margin-right:auto}.table th,.table td{vertical-align:middle}.alert i { vertical-align: -0.125em; }</style></head><body><%- include('navbar', { pageTitle: 'Dashboard' }) %><div class="container mt-4"><h2 class="mb-4"><i class="bi bi-speedometer2"></i> แดชบอร์ดภาพรวม</h2><div class="row g-4 mb-4"><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-primary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">สินค้า</h5><h2 class="card-text display-6"><%= stats.totalProducts %></h2></div><i class="bi bi-box-seam card-icon opacity-75"></i></div><a href="/admin/products" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการสินค้า</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-info h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">หมวดหมู่</h5><h2 class="card-text display-6"><%= stats.totalCategories %></h2></div><i class="bi bi-tags card-icon opacity-75"></i></div><a href="/admin/categories" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการหมวดหมู่</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-4 col-sm-6"><div class="card text-white bg-success h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">คำสั่งซื้อสำเร็จ</h5><h2 class="card-text display-6"><%= stats.completedOrders %> <small>/ <%= stats.totalOrders %></small></h2></div><i class="bi bi-cart-check card-icon opacity-75"></i></div><a href="/admin/orders" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>ดูคำสั่งซื้อ</span> <i class="bi bi-arrow-right-circle"></i></a></div></div><div class="col-xl-2dot4 col-md-6 col-sm-6"><div class="card text-dark bg-warning h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">รายรับรวม</h5><h3 class="card-text">฿<%= stats.totalRevenue %></h3><small>(หลังหักส่วนลด)</small></div><i class="bi bi-currency-bitcoin card-icon opacity-75"></i></div><div class="card-footer text-dark"><small>ยอดส่วนลดรวม: ฿<%= stats.totalDiscountsGiven %></small></div></div></div><div class="col-xl-2dot4 col-md-6 col-sm-12"><div class="card text-white bg-secondary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">ส่วนลดใช้งาน</h5><h2 class="card-text display-6"><%= stats.activeDiscountCodes %></h2></div><i class="bi bi-percent card-icon opacity-75"></i></div><a href="/admin/discounts" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการส่วนลด</span> <i class="bi bi-arrow-right-circle"></i></a></div></div></div><!-- Status Alerts --><div class="row g-2 mb-3"><div class="col-md-6"><div class="alert alert-primary mb-0" role="alert"><i class="bi bi-megaphone-fill"></i> <strong>โปรโมชั่นอัตโนมัติ:</strong> <%= stats.autoPromotionStatus %> <a href="/admin/settings" class="alert-link ms-2">(แก้ไข)</a></div></div><div class="col-md-6"><div class="alert alert-<%= stats.aiChatStatus === 'เปิดใช้งาน' ? 'info' : 'secondary' %> mb-0" role="alert"><i class="bi bi-robot"></i> <strong>AI Chat:</strong> <%= stats.aiChatStatus %> <a href="/admin/settings" class="alert-link ms-2">(แก้ไข)</a></div></div></div><div class="card mt-4"><div class="card-header bg-light"><h4><i class="bi bi-clock-history"></i> คำสั่งซื้อล่าสุด (5 รายการ)</h4></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รหัส</th><th>ลูกค้า</th><th>ยอดรวม (ส่วนลด)</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่</th></tr></thead><tbody><% if(stats.recentOrders.length > 0){ %><% stats.recentOrders.forEach(order => { const finalAmount = order.finalAmount !== undefined ? order.finalAmount : ((order.originalTotalAmount || 0) - (order.discountAmount || 0)); %><tr><td><a href="/admin/orders#order-<%= order.id %>" title="<%= order.id %>"><%= order.id.slice(0,12) %>...</a></td><td><span title="<%= order.userId %>"><%= order.userId.slice(0,6) %>...<%= order.userId.slice(-4) %></span></td><td>฿<%= finalAmount.toFixed(2) %><% if (order.discountAmount && order.discountAmount > 0) { %><br><small class="text-danger" title="Code: <%= order.discountCode || 'N/A' %>">(-฿<%= order.discountAmount.toFixed(2) %><% if (order.discountCode === 'AUTO_PROMO') { %> <i class="bi bi-stars text-warning" title="โปรโมชั่นอัตโนมัติ"></i><% } %>)</small><% } %></td><td><span class="badge bg-<%= order.paymentMethod==='angpao'?'danger':order.paymentMethod==='bank'?'info':order.paymentMethod==='redeem_code'?'primary':'secondary' %> text-capitalize"><i class="bi bi-<%= order.paymentMethod==='angpao'?'gift':order.paymentMethod==='bank'?'bank':order.paymentMethod==='redeem_code'?'key':'question-circle' %>"></i> <%= order.paymentMethod || 'N/A' %></span></td><td><span class="badge bg-<%= order.status === 'completed' ? 'success' : (order.status === 'cancelled' || order.status === 'refunded' ? 'danger' : (order.status === 'pending' ? 'warning' : 'secondary')) %> text-capitalize"><%= order.status || 'N/A' %></span></td><td><%= new Date(order.createdAt || Date.now()).toLocaleString('th-TH', {dateStyle:'short', timeStyle:'short'}) %></td></tr><% }) %><% } else { %><tr><td colspan="6" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div><div class="card-footer text-end bg-light border-top-0"><a href="/admin/orders" class="btn btn-outline-primary btn-sm">ดูคำสั่งซื้อทั้งหมด <i class="bi bi-arrow-right"></i></a></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><style>.col-xl-2dot4 { flex: 0 0 auto; width: 20%; } @media (max-width: 1200px) { .col-xl-2dot4 { width: 33.333%; } } @media (max-width: 992px) { .col-xl-2dot4 { width: 50%; } } @media (max-width: 576px) { .col-xl-2dot4 { width: 100%; } }</style></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>แดชบอร์ด - ระบบจัดการร้านค้า</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.card-icon { font-size: 2.5rem; } .card { transition: transform 0.2s ease-in-out; } .card:hover { transform: translateY(-5px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); } body { padding-top: 70px; background-color: #f8f9fa; } .card-footer span { margin-right: auto; } .table th, .table td { vertical-align: middle; } </style></head><body><%- include('navbar') %><div class="container mt-4"><h2 class="mb-4"><i class="bi bi-speedometer2"></i> แดชบอร์ดภาพรวม</h2><div class="row g-4 mb-4"> <div class="col-md-3 col-sm-6"><div class="card text-white bg-primary h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">ชนิดสินค้า</h5><h2 class="card-text display-6"><%= stats.totalProducts %></h2><small>สินค้าในสต็อก: <%= stats.totalStockItems %></small></div><i class="bi bi-box-seam card-icon opacity-75"></i></div><a href="/admin/products" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการสินค้า</span> <i class="bi bi-arrow-right-circle"></i></a></div></div> <div class="col-md-3 col-sm-6"><div class="card text-white bg-info h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">หมวดหมู่</h5><h2 class="card-text display-6"><%= stats.totalCategories %></h2></div><i class="bi bi-tags card-icon opacity-75"></i></div><a href="/admin/categories" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>จัดการหมวดหมู่</span> <i class="bi bi-arrow-right-circle"></i></a></div></div> <div class="col-md-3 col-sm-6"><div class="card text-white bg-success h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">คำสั่งซื้อสำเร็จ</h5><h2 class="card-text display-6"><%= stats.completedOrders %> / <%= stats.totalOrders %></h2></div><i class="bi bi-cart-check card-icon opacity-75"></i></div><a href="/admin/orders" class="card-footer text-white text-decoration-none d-flex justify-content-between align-items-center"><span>ดูคำสั่งซื้อ</span> <i class="bi bi-arrow-right-circle"></i></a></div></div> <div class="col-md-3 col-sm-6"><div class="card text-white bg-warning h-100"><div class="card-body d-flex justify-content-between align-items-center"><div><h5 class="card-title">รายรับรวม</h5><h3 class="card-text">฿<%= stats.totalRevenue %></h3></div><i class="bi bi-currency-bitcoin card-icon opacity-75"></i></div><div class="card-footer text-white"><small>จากคำสั่งซื้อที่สำเร็จ</small></div></div></div></div><div class="card mt-4"><div class="card-header bg-light"><h4><i class="bi bi-clock-history"></i> คำสั่งซื้อล่าสุด (5 รายการ)</h4></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รหัส</th><th>ลูกค้า (PSID)</th><th>ยอดรวม</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่</th></tr></thead><tbody><% if (stats.recentOrders.length > 0) { %><% stats.recentOrders.forEach(order => { %><tr><td><a href="/admin/orders#order-<%= order.id %>" title="<%= order.id %>"><%= order.id.slice(0, 12) %>...</a></td><td><span title="<%= order.userId %>"><%= order.userId.slice(0, 6) %>...<%= order.userId.slice(-4) %></span></td><td>฿<%= order.totalAmount.toFixed(2) %></td><td><%= order.paymentMethod %></td><td><span class="badge bg-<%= order.status === 'completed' ? 'success' : (order.status === 'cancelled' ? 'danger' : (order.status === 'pending' ? 'warning' : 'secondary')) %> text-capitalize"><%= order.status %></span></td><td><%= new Date(order.createdAt).toLocaleString('th-TH', {dateStyle:'short', timeStyle:'short'}) %></td></tr><% }) %><% } else { %><tr><td colspan="6" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div><div class="card-footer text-end bg-light border-top-0"><a href="/admin/orders" class="btn btn-outline-primary btn-sm">ดูคำสั่งซื้อทั้งหมด <i class="bi bi-arrow-right"></i></a></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script></body></html>
 `,
+    // --- PRODUCTS (No changes needed from previous) ---
     'products.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการสินค้า - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.product-image-thumb{width:60px;height:60px;object-fit:cover;border-radius:4px}.image-preview{max-width:150px;max-height:100px;margin-top:10px;display:none;border:1px solid #ddd;padding:2px;border-radius:4px}th,td{vertical-align:middle}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.stock-items-display{font-size:.8rem;color:#6c757d;max-height:60px;overflow-y:auto;display:block;white-space:pre-wrap;word-break:break-all}.stock-item-delete-btn{font-size:.7rem;padding:.1rem .3rem;line-height:1}.modal-xl{max-width:1000px}</style></head><body><%- include('navbar', { pageTitle: 'Products' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-box-seam"></i> จัดการสินค้า (<%= products.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addProductModal"><i class="bi bi-plus-circle"></i> เพิ่มสินค้า</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อ</th><th>ราคา (฿)</th><th>คงเหลือ</th><th>หมวดหมู่</th><th>วันที่เพิ่ม/แก้ไข</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if(products.length > 0){ %><% products.forEach(product => { const modalId = "editProductModal" + product.id.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td><img src="<%= product.imageUrl %>" alt="Img" class="product-image-thumb" onerror="this.onerror=null; this.src='https://via.placeholder.com/60/dee2e6/6c757d?text=Err';"></td><td><%= product.name %><br><small class="text-muted">ID: <%= product.id.substring(0, 10) %>...</small></td><td><%= product.price.toFixed(2) %></td><td><span class="badge fs-6 bg-<%= product.stock > 5 ? 'success' : (product.stock > 0 ? 'warning' : 'danger') %>" title="คลิกเพื่อแก้ไขสต็อก" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" style="cursor:pointer;"><%= product.stock %></span></td><td><small><%= product.category %></small></td><td><small title="Created: <%= new Date(product.createdAt || 0).toLocaleString('th-TH') %>\nUpdated: <%= new Date(product.updatedAt || 0).toLocaleString('th-TH') %>"><%= new Date(product.updatedAt || product.createdAt || 0).toLocaleDateString('th-TH', { year:'2-digit', month:'short', day:'numeric'}) %></small></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/products/delete/<%= product.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('ยืนยันลบสินค้า: <%= product.name %> ?')" title="ลบ"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีสินค้าในระบบ</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Product Modal --><div class="modal fade" id="addProductModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/products/add"><div class="modal-header"><h5 class="modal-title">เพิ่มสินค้าใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อสินค้า*</label><input type="text" name="name" class="form-control" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา (฿)*</label><input type="number" name="price" class="form-control" step="0.01" min="0" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><option value="" disabled <%= categories.length === 0 ? '' : 'selected' %>>-- เลือก --</option><% categories.forEach(c => { %><option value="<%= c.name %>"><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! กรุณาเพิ่มหมวดหมู่ก่อน !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" required placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">ต้องเป็น http/https:// และลงท้ายด้วย .jpg, .png, .gif, .webp, .svg etc.</div></div><div class="mb-3"><label class="form-label">ข้อมูลสต็อกสินค้า (Stock Items)*</label><textarea name="stockItemsInput" class="form-control" required rows="5" placeholder="ใส่ข้อมูลที่จะส่งให้ลูกค้า 1 รายการ ต่อ 1 บรรทัด (เช่น โค้ด, ลิงก์ดาวน์โหลด)"></textarea><div class="form-text">จำนวนบรรทัด = จำนวนสต็อกเริ่มต้น. ห้ามเว้นบรรทัดว่าง.</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary" <%= categories.length === 0 ? 'disabled' : '' %>>บันทึกสินค้า</button></div></form></div></div></div><!-- Edit Product Modals --><% products.forEach(product => { const modalId = "editProductModal" + product.id.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-xl"><div class="modal-content"><form method="POST" action="/admin/products/edit/<%= product.id %>"><div class="modal-header"><h5 class="modal-title">แก้ไขสินค้า: <%= product.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="row"><div class="col-lg-7"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" value="<%= product.name %>" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา*</label><input type="number" name="price" class="form-control" step="0.01" min="0" value="<%= product.price %>" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><% categories.forEach(c => { %><option value="<%= c.name %>" <%= c.name === product.category ? 'selected' : '' %>><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! ไม่มีหมวดหมู่ !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= product.description %></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control" value="<%= product.language || '' %>"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control" value="<%= product.version || '' %>"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= product.imageUrl %>" required><img src="<%= product.imageUrl %>" class="image-preview" style="display:block;" onerror="this.style.display='none';"><div class="form-text text-muted">ต้องเป็น http/https:// และลงท้ายด้วย .jpg, .png, .gif, .webp, .svg etc.</div></div></div><div class="col-lg-5"><div class="mb-3"><label class="form-label">รายการสต็อกปัจจุบัน (<%= product.stockItems ? product.stockItems.length : 0 %> รายการ)</label><div class="border rounded p-2 bg-light stock-items-display" style="max-height: 150px; overflow-y: auto;"><% if (Array.isArray(product.stockItems) && product.stockItems.length > 0) { %><ul class="list-unstyled mb-0"><% product.stockItems.forEach((item, index) => { %><li class="d-flex justify-content-between align-items-center mb-1"><small class="me-2 text-truncate" title="<%= item %>"><%= index + 1 %>. <%= item %></small><form method="POST" action="/admin/products/stock/delete/<%= product.id %>/<%= index %>" class="d-inline" onsubmit="return confirm('ยืนยันลบสต็อกรายการที่ <%= index + 1 %> ?')"><button type="submit" class="btn btn-outline-danger btn-sm stock-item-delete-btn" title="ลบรายการนี้"><i class="bi bi-x-lg"></i></button></form></li><% }) %></ul><% } else { %><span class="text-muted">ไม่มีสต็อก</span><% } %></div></div><hr><div class="mb-3"><label class="form-label">เพิ่มสต็อก (Stock Items)</label><textarea name="stockItemsToAdd" class="form-control" rows="4" placeholder="ใส่ข้อมูลสต็อกที่จะเพิ่ม 1 รายการ ต่อ 1 บรรทัด"></textarea><div class="form-text">ข้อมูลที่เพิ่มจะต่อท้ายรายการเดิม. ห้ามเว้นบรรทัดว่าง.</div></div></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=e=>{const o=e.querySelector('.image-url-input'),n=e.querySelector('.image-preview');if(!o||!n)return;const i=()=>{const t=o.value.trim(),l=/^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp|bmp|svg)([\?#].*)?$/i.test(t);l?(n.src=t,n.style.display='block',o.classList.remove('is-invalid'),n.onerror=()=>{n.style.display='none';o.classList.add('is-invalid')}) : (n.style.display='none',n.src='',t?o.classList.add('is-invalid'):o.classList.remove('is-invalid'))};o.addEventListener('input',i),o.dispatchEvent(new Event('input'))};document.querySelectorAll('.modal').forEach(t);const e=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(t){}},1e4)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการสินค้า - ระบบจัดการร้านค้า</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.product-image-thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 4px;} .image-preview { max-width: 150px; max-height: 100px; margin-top: 10px; display: none; border: 1px solid #ddd; padding: 2px; border-radius: 4px; } th, td { vertical-align: middle; } body { padding-top: 70px; background-color: #f8f9fa; } .btn-action form { display: inline; } </style></head><body><%- include('navbar') %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-box-seam"></i> จัดการสินค้า (<%= products.length %> ชนิด)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addProductModal"><i class="bi bi-plus-circle"></i> เพิ่มสินค้า</button></div><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อ</th><th>ราคา (฿)</th><th>คงเหลือ (ชิ้น)</th><th>หมวดหมู่</th><th>วันที่เพิ่ม/แก้ไข</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if (products.length > 0) { %><% products.forEach(product => { const stockCount = product.downloadUrls?.length || 0; %><tr><td><img src="<%= product.imageUrl %>" alt="Image" class="product-image-thumb" onerror="this.src='https://via.placeholder.com/60?text=N/A'; this.alt='No Image'"></td><td><%= product.name %><br><small class="text-muted">ID: <%= product.id %></small></td><td><%= product.price.toFixed(2) %></td><td><span class="badge fs-6 bg-<%= stockCount > 5 ? 'success' : (stockCount > 0 ? 'warning' : 'danger') %>"><%= stockCount %></span></td><td><small><%= product.category %></small></td><td><small title="Created: <%= new Date(product.createdAt).toLocaleString('th-TH') %>\nUpdated: <%= new Date(product.updatedAt).toLocaleString('th-TH') %>"><%= new Date(product.updatedAt || product.createdAt).toLocaleDateString('th-TH', { year:'2-digit', month: 'short', day:'numeric'}) %></small></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#editProductModal<%= product.id.replace(/[^a-zA-Z0-9]/g, '') %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/products/delete/<%= product.id %>"><button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('ยืนยันลบสินค้า: <%= product.name %> ?')" title="ลบ"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีสินค้าในระบบ</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Product Modal --><div class="modal fade" id="addProductModal" tabindex="-1" aria-labelledby="addProductModalLabel" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/products/add" id="addProductForm"><div class="modal-header"><h5 class="modal-title" id="addProductModalLabel">เพิ่มสินค้าใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อสินค้า*</label><input type="text" name="name" class="form-control" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา (฿)*</label><input type="number" name="price" class="form-control" step="0.01" min="0" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><option value="" disabled <%= categories.length === 0 ? '' : 'selected' %>>-- เลือกหมวดหมู่ --</option><% categories.forEach(c => { %><option value="<%= c.name %>"><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! กรุณาเพิ่มหมวดหมู่ก่อน !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียดสินค้า</label><textarea name="description" class="form-control" rows="2"></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา (ถ้ามี)</label><input type="text" name="language" class="form-control"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน (ถ้ามี)</label><input type="text" name="version" class="form-control"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" required placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">ต้องเป็น https หรือ data:image/... และลงท้ายด้วย .jpg, .png, .gif, .webp (ถ้าเป็น URL)</div></div><div class="mb-3"><label class="form-label">ข้อมูลส่งลูกค้า (ลิงก์/โค้ด)*</label><textarea name="downloadUrlsText" class="form-control" required rows="5" placeholder="ใส่ข้อมูล 1 บรรทัดต่อ 1 ชิ้น เช่น โค้ด, ลิงก์ดาวน์โหลดเฉพาะ"></textarea><div class="form-text text-danger fw-bold">สำคัญ: แต่ละบรรทัด คือ 1 ชิ้นในสต็อก บรรทัดว่างจะถูกข้าม</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary" <%= categories.length === 0 ? 'disabled' : '' %>>บันทึกสินค้า</button></div></form></div></div></div><!-- Edit Product Modals --><% products.forEach(product => { %><div class="modal fade" id="editProductModal<%= product.id.replace(/[^a-zA-Z0-9]/g, '') %>" tabindex="-1" aria-labelledby="editProductModalLabel<%= product.id.replace(/[^a-zA-Z0-9]/g, '') %>" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/products/edit/<%= product.id %>"><div class="modal-header"><h5 class="modal-title" id="editProductModalLabel<%= product.id.replace(/[^a-zA-Z0-9]/g, '') %>">แก้ไขสินค้า: <%= product.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div class="row"><div class="col-md-8 mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" value="<%= product.name %>" required></div><div class="col-md-4 mb-3"><label class="form-label">ราคา*</label><input type="number" name="price" class="form-control" step="0.01" min="0" value="<%= product.price %>" required></div></div><div class="mb-3"><label class="form-label">หมวดหมู่*</label><select name="category" class="form-select" required><% categories.forEach(c => { %><option value="<%= c.name %>" <%= c.name === product.category ? 'selected' : '' %>><%= c.name %></option><% }) %><% if(categories.length === 0){ %><option disabled>!! ไม่มีหมวดหมู่ !!</option><% } %></select></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= product.description %></textarea></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ภาษา</label><input type="text" name="language" class="form-control" value="<%= product.language || '' %>"></div><div class="col-md-6 mb-3"><label class="form-label">เวอร์ชัน</label><input type="text" name="version" class="form-control" value="<%= product.version || '' %>"></div></div><div class="mb-3"><label class="form-label">URL รูปภาพ*</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= product.imageUrl %>" required><img src="<%= product.imageUrl %>" class="image-preview" style="display:block;"><div class="form-text text-muted">ต้องเป็น https หรือ data:image/... และลงท้ายด้วย .jpg, .png, .gif, .webp (ถ้าเป็น URL)</div></div><div class="mb-3"><label class="form-label">ข้อมูลส่งลูกค้า (ลิงก์/โค้ด)*</label><textarea name="downloadUrlsText" class="form-control" required rows="5"><%= product.downloadUrls.join('\\n') %></textarea><div class="form-text text-danger fw-bold">สำคัญ: แต่ละบรรทัด คือ 1 ชิ้นในสต็อก บรรทัดว่างจะถูกข้าม การแก้ไขจะแทนที่ข้อมูลเดิมทั้งหมด</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded', function() { const setupPreview = (modal) => { const urlInput = modal.querySelector('.image-url-input'); const preview = modal.querySelector('.image-preview'); if (!urlInput || !preview) return; const update = () => { const url = urlInput.value.trim(); const isValid = url && (url.startsWith('data:image/') || /^(https?:\/\/).+\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(url)); if (isValid) { preview.src = url; preview.style.display = 'block'; urlInput.classList.remove('is-invalid'); } else { preview.style.display = 'none'; preview.src=''; if (url) urlInput.classList.add('is-invalid'); else urlInput.classList.remove('is-invalid'); }}; urlInput.addEventListener('input', update); update(); }; document.querySelectorAll('.modal').forEach(setupPreview); });</script></body></html>
 `,
+    // --- CATEGORIES (No changes needed from previous) ---
     'categories.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการหมวดหมู่ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.category-image-thumb{width:50px;height:50px;object-fit:cover;border-radius:4px;margin-right:10px;background-color:#eee}th,td{vertical-align:middle}.alert-tooltip{cursor:help}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.image-preview{max-width:100px;max-height:80px;margin-top:5px;display:none;border:1px solid #ddd;padding:2px;border-radius:4px}</style></head><body><%- include('navbar', { pageTitle: 'Categories' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-tags-fill"></i> จัดการหมวดหมู่ (<%= categories.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCategoryModal"><i class="bi bi-plus-circle"></i> เพิ่มหมวดหมู่</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อหมวดหมู่</th><th>รายละเอียด</th><th class="text-center">สินค้า</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if(categories.length > 0){ %><% categories.forEach(category => { const modalId = "editCategoryModal" + category.name.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td><img src="<%= category.imageUrl || 'https://via.placeholder.com/50/dee2e6/6c757d?text=N/A' %>" alt="Img" class="category-image-thumb" onerror="this.onerror=null; this.src='https://via.placeholder.com/50/dee2e6/6c757d?text=N/A';"></td><td><%= category.name %></td><td><small><%= category.description || '-' %></small></td><td class="text-center"><span class="badge bg-secondary rounded-pill"><%= category.productCount %></span></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/categories/delete/<%= encodeURIComponent(category.name) %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" <%= category.productCount > 0 ? 'disabled' : '' %> onclick="return confirm('ยืนยันลบหมวดหมู่: <%= category.name %> ? (ต้องไม่มีสินค้าในหมวดนี้)')" title="<%= category.productCount > 0 ? 'ไม่สามารถลบได้ มีสินค้าอยู่ ' + category.productCount + ' รายการ' : 'ลบหมวดหมู่' %>"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="5" class="text-center text-muted py-3">ยังไม่มีหมวดหมู่</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Modal --><div class="modal fade" id="addCategoryModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/add"><div class="modal-header"><h5 class="modal-title">เพิ่มหมวดหมู่ใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อ*</label><input type="text" name="name" class="form-control" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">http/https://... .jpg, .png, .gif, .webp etc.</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"></textarea></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่ม</button></div></form></div></div></div><!-- Edit Modals --><% categories.forEach(category => { const modalId = "editCategoryModal" + category.name.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/edit"><input type="hidden" name="originalName" value="<%= category.name %>"><div class="modal-header"><h5 class="modal-title">แก้ไข: <%= category.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อใหม่*</label><input type="text" name="newName" class="form-control" value="<%= category.name %>" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= category.imageUrl %>"><img src="<%= category.imageUrl %>" class="image-preview" style="<%= category.imageUrl ? 'display:block;' : '' %>" onerror="this.style.display='none';"><div class="form-text text-muted">http/https://... .jpg, .png, .gif, .webp etc.</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= category.description %></textarea></div><div class="alert alert-warning small p-2"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนชื่อ จะอัปเดตสินค้าในหมวดนี้อัตโนมัติ</div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึก</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=e=>{const o=e.querySelector('.image-url-input'),n=e.querySelector('.image-preview');if(!o||!n)return;const i=()=>{const t=o.value.trim(),l=/^(https?:\/\/).+\.(jpg|jpeg|png|gif|webp|bmp|svg)([\?#].*)?$/i.test(t);l?(n.src=t,n.style.display='block',o.classList.remove('is-invalid'),n.onerror=()=>{n.style.display='none';o.classList.add('is-invalid')}) : (n.style.display='none',n.src='',t?o.classList.add('is-invalid'):o.classList.remove('is-invalid'))};o.addEventListener('input',i),o.dispatchEvent(new Event('input'))};document.querySelectorAll('.modal').forEach(t);const e=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(t){}},1e4)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการหมวดหมู่ - ระบบจัดการร้านค้า</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>.category-image-thumb { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; margin-right: 10px; background-color: #eee; } th, td { vertical-align: middle; } .alert-tooltip { cursor: help; } body { padding-top: 70px; background-color: #f8f9fa;} .btn-action form { display: inline; } .image-preview { max-width: 100px; max-height: 80px; margin-top: 5px; display: none; border: 1px solid #ddd; padding: 2px; border-radius: 4px; } </style></head><body><%- include('navbar') %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-tags"></i> จัดการหมวดหมู่ (<%= categories.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCategoryModal"><i class="bi bi-plus-circle"></i> เพิ่มหมวดหมู่</button></div><% if (typeof error !== 'undefined' && error === 'delete_failed_in_use') { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><strong><i class="bi bi-exclamation-triangle-fill"></i> ลบไม่สำเร็จ!</strong> ไม่สามารถลบหมวดหมู่ได้เนื่องจากมีสินค้าใช้งานอยู่ กรุณาย้ายสินค้าออกก่อน<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead class="table-light"><tr><th>รูป</th><th>ชื่อหมวดหมู่</th><th>รายละเอียด</th><th class="text-center">จำนวนสินค้า</th><th class="text-center">จัดการ</th></tr></thead><tbody><% if (categories.length > 0) { %><% categories.forEach(category => { %><tr><td><img src="<%= category.imageUrl || 'https://via.placeholder.com/50/dee2e6/6c757d?text=N/A' %>" alt="Img" class="category-image-thumb"></td><td><%= category.name %></td><td><small><%= category.description || '-' %></small></td><td class="text-center"><%= category.productCount %></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#editCategoryModal<%= category.name.replace(/[^a-zA-Z0-9]/g, '') %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/categories/delete/<%= encodeURIComponent(category.name) %>"><button type="submit" class="btn btn-sm btn-danger" <%= category.productCount > 0 ? 'disabled' : '' %> onclick="return confirm('ยืนยันลบหมวดหมู่: <%= category.name %> ? (ต้องไม่มีสินค้าในหมวดนี้)')" title="<%= category.productCount > 0 ? 'ไม่สามารถลบได้ มีสินค้าอยู่' : 'ลบหมวดหมู่' %>"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="5" class="text-center text-muted py-3">ยังไม่มีหมวดหมู่</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Category Modal --><div class="modal fade" id="addCategoryModal" tabindex="-1" aria-labelledby="addCategoryModalLabel" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/add"><div class="modal-header"><h5 class="modal-title" id="addCategoryModalLabel">เพิ่มหมวดหมู่ใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อหมวดหมู่*</label><input type="text" name="name" class="form-control" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ (ถ้ามี)</label><input type="url" name="imageUrl" class="form-control image-url-input" placeholder="https://..."><img src="" class="image-preview"><div class="form-text text-muted">ต้องเป็น https หรือ data:image/... และลงท้ายด้วย .jpg, .png, .gif, .webp (ถ้าเป็น URL)</div></div><div class="mb-3"><label class="form-label">รายละเอียด (ถ้ามี)</label><textarea name="description" class="form-control" rows="2"></textarea></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่มหมวดหมู่</button></div></form></div></div></div><!-- Edit Category Modals --><% categories.forEach(category => { %><div class="modal fade" id="editCategoryModal<%= category.name.replace(/[^a-zA-Z0-9]/g, '') %>" tabindex="-1" aria-labelledby="editCategoryModalLabel<%= category.name.replace(/[^a-zA-Z0-9]/g, '') %>" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/categories/edit"><input type="hidden" name="originalName" value="<%= category.name %>"><div class="modal-header"><h5 class="modal-title" id="editCategoryModalLabel<%= category.name.replace(/[^a-zA-Z0-9]/g, '') %>">แก้ไขหมวดหมู่: <%= category.name %></h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">ชื่อใหม่*</label><input type="text" name="newName" class="form-control" value="<%= category.name %>" required></div><div class="mb-3"><label class="form-label">URL รูปภาพ</label><input type="url" name="imageUrl" class="form-control image-url-input" value="<%= category.imageUrl %>"><img src="<%= category.imageUrl %>" class="image-preview" style="<%= category.imageUrl ? 'display:block;' : '' %>"><div class="form-text text-muted">ต้องเป็น https หรือ data:image/... และลงท้ายด้วย .jpg, .png, .gif, .webp (ถ้าเป็น URL)</div></div><div class="mb-3"><label class="form-label">รายละเอียด</label><textarea name="description" class="form-control" rows="2"><%= category.description %></textarea></div><div class="alert alert-warning small p-2" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนชื่อหมวดหมู่ จะอัปเดตสินค้าทั้งหมดที่อยู่ในหมวดหมู่นี้โดยอัตโนมัติ</div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded', function() { const setupPreview = (modal) => { const urlInput = modal.querySelector('.image-url-input'); const preview = modal.querySelector('.image-preview'); if (!urlInput || !preview) return; const update = () => { const url = urlInput.value.trim(); const isValid = url && (url.startsWith('data:image/') || /^(https?:\/\/).+\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(url)); if (isValid) { preview.src = url; preview.style.display = 'block'; urlInput.classList.remove('is-invalid'); } else { preview.style.display = 'none'; preview.src = ''; if (url) urlInput.classList.add('is-invalid'); else urlInput.classList.remove('is-invalid'); }}; urlInput.addEventListener('input', update); update(); // Initial check }; document.querySelectorAll('.modal').forEach(setupPreview); const alertElement = document.querySelector('.alert-danger'); if(alertElement){ const alert = new bootstrap.Alert(alertElement); setTimeout(() => { alert.close(); }, 10000); } });</script></body></html>
 `,
+    // --- ORDERS (No changes needed from previous) ---
     'orders.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการคำสั่งซื้อ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>th,td{vertical-align:middle;font-size:.9rem}.item-list{list-style:none;padding-left:0;margin-bottom:0}.item-list li{font-size:.85rem}.status-select{min-width:120px}.order-row{border-left:4px solid transparent;transition:border-color .3s ease,background-color .3s ease}.order-row:target{border-left-color:#0d6efd;background-color:#e7f1ff}body{padding-top:70px;background-color:#f8f9fa}.confirmation-link{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:middle}.btn-action form{display:inline}</style></head><body><%- include('navbar', { pageTitle: 'Orders' }) %><div class="container mt-4"><h2><i class="bi bi-receipt-cutoff"></i> จัดการคำสั่งซื้อ (<%= orders.length %> รายการ)</h2><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card mt-3 shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover table-bordered mb-0"><thead class="table-light"><tr><th>#</th><th>รหัสสั่งซื้อ</th><th>ลูกค้า</th><th>รายการ (ชื่อ x จำนวน)</th><th>ยอดจ่าย (฿)</th><th>ส่วนลด</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่</th><th>ข้อมูลยืนยัน</th><th>จัดการ</th></tr></thead><tbody><% if(orders.length > 0){ %><% orders.forEach((order, index) => { const finalAmount = order.finalAmount !== undefined ? order.finalAmount : ((order.originalTotalAmount || 0) - (order.discountAmount || 0)); %><tr class="order-row" id="order-<%= order.id %>"><td><%= index + 1 %></td><td><small title="<%= order.id %>"><%= order.id.substring(0,16) %>...</small></td><td><small title="<%= order.userId %>"><%= order.userId.substring(0,6) %>...<%= order.userId.slice(-4) %></small></td><td><ul class="item-list"><% (order.items || []).forEach(item => { %><li><small title="ID: <%= item.productId %>"><b><%= item.name %></b> x <%= item.quantity %></small></li><% }) %></ul></td><td><b><%= finalAmount.toFixed(2) %></b></td><td><% if (order.discountAmount && order.discountAmount > 0) { %><span class="badge bg-danger" title="Code: <%= order.discountCode || 'N/A' %>">฿<%= order.discountAmount.toFixed(2) %></span><br><small class="text-muted"><%= order.discountCode %><% if (order.discountCode === 'AUTO_PROMO') { %> <i class="bi bi-stars text-warning" title="โปรโมชั่นอัตโนมัติ"></i><% } %></small><% } else { %><span class="text-muted">-</span><% } %></td><td><span class="badge bg-<%= order.paymentMethod==='angpao'?'danger':order.paymentMethod==='bank'?'info':order.paymentMethod==='redeem_code'?'primary':'secondary' %> text-capitalize"><i class="bi bi-<%= order.paymentMethod==='angpao'?'gift':order.paymentMethod==='bank'?'bank':order.paymentMethod==='redeem_code'?'key':'question-circle' %>"></i> <%= order.paymentMethod || 'N/A' %></span></td><td><form method="POST" action="/admin/orders/status/<%= order.id %>" class="d-inline-block"><select name="status" class="form-select form-select-sm status-select" onchange="this.form.submit()" title="เปลี่ยนสถานะ"><option value="pending" <%=order.status==='pending'?'selected':'' %>>⏳ รอดำเนินการ</option><option value="processing" <%=order.status==='processing'?'selected':'' %>>🔄 กำลังเตรียม</option><option value="completed" <%=order.status==='completed'?'selected':'' %>>✔️ สำเร็จ</option><option value="cancelled" <%=order.status==='cancelled'?'selected':'' %>>❌ ยกเลิก</option><option value="shipped" <%=order.status==='shipped'?'selected':'' %>>🚚 จัดส่งแล้ว</option><option value="refunded" <%=order.status==='refunded'?'selected':'' %>>💸 คืนเงิน</option></select></form></td><td><small title="Created: <%= new Date(order.createdAt || 0).toLocaleString('th-TH') %> | Updated: <%= new Date(order.updatedAt || 0).toLocaleString('th-TH') %>"><%= new Date(order.createdAt || 0).toLocaleString('th-TH', { dateStyle:'short', timeStyle:'short'}) %></small></td><td class="text-center"><% if(order.paymentConfirmation && (String(order.paymentConfirmation).startsWith('http'))){ %><a href="<%= order.paymentConfirmation %>" target="_blank" class="btn btn-sm btn-outline-secondary confirmation-link" title="ดู: <%= order.paymentConfirmation %>"><i class="bi bi-link-45deg"></i> ลิงก์/สลิป</a><% } else if(order.paymentConfirmation){ %><span class="badge bg-light text-dark" title="Ref/Code: <%= order.paymentConfirmation %>"><small><%= String(order.paymentConfirmation).substring(0,15) %>...</small></span><% } else { %> <span class="text-muted">-</span> <% } %></td><td class="text-center btn-action"><form method="POST" action="/admin/orders/delete/<%= order.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('ยืนยันลบคำสั่งซื้อ: <%= order.id %> ?')" title="ลบคำสั่งซื้อนี้"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="11" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){if(window.location.hash){const e=document.querySelector(window.location.hash);if(e){e.scrollIntoView({behavior:'smooth',block:'center'});e.style.transition='background-color 0.5s ease-in-out';e.style.backgroundColor='#e7f1ff';setTimeout(()=>{e.style.backgroundColor='transparent'},1500)}};const t=document.querySelector('.alert-success'),o=document.querySelector('.alert-danger');t&&setTimeout(()=>{try{new bootstrap.Alert(t).close()}catch(e){}},7e3),o&&setTimeout(()=>{try{new bootstrap.Alert(o).close()}catch(e){}},1e4)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการคำสั่งซื้อ - ระบบจัดการร้านค้า</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>th, td { vertical-align: middle; font-size: 0.9rem; } .item-list { list-style: none; padding-left: 0; margin-bottom: 0; } .item-list li { font-size: 0.85rem; } .delivered-data { font-family: monospace; font-size: 0.8rem; color: #6c757d; word-break: break-all; max-width: 200px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; cursor: help;} .status-select { min-width: 120px; } .order-row { border-left: 4px solid transparent; transition: border-color 0.3s ease, background-color 0.3s ease; } .order-row:target { border-left-color: #0d6efd; background-color: #e7f1ff; animation: highlight 1.5s ease-out; } body { padding-top: 70px; background-color: #f8f9fa; } .confirmation-link { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; } @keyframes highlight{ 0%{ background-color: #e7f1ff; } 100%{ background-color: transparent; }} </style></head><body><%- include('navbar') %><div class="container mt-4"><h2><i class="bi bi-receipt"></i> จัดการคำสั่งซื้อ (<%= orders.length %> รายการ)</h2><div class="card mt-3 shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover table-bordered mb-0"><thead class="table-light"><tr><th>#</th><th>รหัสคำสั่งซื้อ</th><th>ลูกค้า (PSID)</th><th>รายการสินค้า (ที่ส่งมอบ)</th><th>ยอด(฿)</th><th>ช่องทาง</th><th>สถานะ</th><th>วันที่สั่งซื้อ</th><th class="text-center">ข้อมูลยืนยัน</th></tr></thead><tbody><% if (orders.length > 0) { %><% orders.forEach((order, index) => { %><tr class="order-row" id="order-<%= order.id %>"><td><%= index + 1 %></td><td><small title="<%= order.id %>"><%= order.id.substring(0, 16) %>...</small></td><td><small title="<%= order.userId %>"><%= order.userId.substring(0, 6) %>...<%= order.userId.slice(-4) %></small></td><td><ul class="item-list"><% order.items.forEach(item => { %><li><small><%= item.name %> <span class="delivered-data" title="ข้อมูลที่ส่ง: <%= item.deliveredData %>">(<%= item.deliveredData.length > 20 ? item.deliveredData.substring(0,17)+'...' : item.deliveredData %>)</span></small></li><% }) %></ul></td><td><b><%= order.totalAmount.toFixed(2) %></b></td><td><span class="badge bg-<%= order.paymentMethod === 'angpao' ? 'danger' : (order.paymentMethod === 'bank' ? 'info' : (order.paymentMethod === 'redeem_code' ? 'primary' : 'secondary')) %> text-capitalize"><i class="bi bi-<%= order.paymentMethod === 'angpao' ? 'gift' : (order.paymentMethod === 'bank' ? 'bank' : (order.paymentMethod === 'redeem_code' ? 'key' : 'question-circle')) %>"></i> <%= order.paymentMethod %></span></td><td><form method="POST" action="/admin/orders/status/<%= order.id %>" class="d-inline-block"><select name="status" class="form-select form-select-sm status-select" onchange="this.form.submit()" title="เปลี่ยนสถานะคำสั่งซื้อ"><option value="pending" <%= order.status === 'pending' ? 'selected' : '' %>>⏳ รอดำเนินการ</option><option value="processing" <%= order.status === 'processing' ? 'selected' : '' %>>🔄 กำลังเตรียม</option><option value="completed" <%= order.status === 'completed' ? 'selected' : '' %>>✔️ สำเร็จ</option><option value="cancelled" <%= order.status === 'cancelled' ? 'selected' : '' %>>❌ ยกเลิก</option><option value="shipped" <%= order.status === 'shipped' ? 'selected' : '' %>>🚚 จัดส่งแล้ว</option><option value="refunded" <%= order.status === 'refunded' ? 'selected' : '' %>>💸 คืนเงิน</option></select></form></td><td><small title="Updated: <%= new Date(order.updatedAt).toLocaleString('th-TH') %>"><%= new Date(order.createdAt).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short'}) %></small></td><td class="text-center"><% if (order.paymentConfirmation && (order.paymentConfirmation.startsWith('http'))) { %><a href="<%= order.paymentConfirmation %>" target="_blank" class="btn btn-sm btn-outline-secondary confirmation-link" title="ดูหลักฐาน: <%= order.paymentConfirmation %>"><i class="bi bi-link-45deg"></i> ลิงก์/สลิป</a><% } else if (order.paymentConfirmation) { %><span class="badge bg-light text-dark" title="Ref: <%= order.paymentConfirmation %>"><small><%= order.paymentConfirmation.substring(0,15) %>...</small></span><% } else { %> <span class="text-muted">-</span> <% } %></td></tr><% }) %><% } else { %><tr><td colspan="9" class="text-center text-muted py-3">ยังไม่มีคำสั่งซื้อ</td></tr><% } %></tbody></table></div></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded', function() { if(window.location.hash) { const el = document.querySelector(window.location.hash); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); /* el.classList.add('highlight-target'); */ } } });</script></body></html>
 `,
+    // --- NAVBAR (UPDATED to include Settings link) ---
+    'navbar.ejs': `
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top shadow-sm"><div class="container"><a class="navbar-brand" href="/admin"><i class="bi bi-shield-lock"></i> Admin Panel</a><button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNavAdmin" aria-controls="navbarNavAdmin" aria-expanded="false" aria-label="Toggle navigation"><span class="navbar-toggler-icon"></span></button><div class="collapse navbar-collapse" id="navbarNavAdmin"><ul class="navbar-nav ms-auto mb-2 mb-lg-0"><li class="nav-item"><a class="nav-link" href="/admin"><i class="bi bi-speedometer2"></i> แดชบอร์ด</a></li><li class="nav-item"><a class="nav-link" href="/admin/products"><i class="bi bi-box-seam"></i> สินค้า</a></li><li class="nav-item"><a class="nav-link" href="/admin/categories"><i class="bi bi-tags"></i> หมวดหมู่</a></li><li class="nav-item"><a class="nav-link" href="/admin/orders"><i class="bi bi-receipt"></i> คำสั่งซื้อ</a></li><li class="nav-item"><a class="nav-link" href="/admin/codes"><i class="bi bi-key"></i> โค้ดรับของ</a></li><li class="nav-item"><a class="nav-link" href="/admin/settings"><i class="bi bi-gear-fill"></i> ตั้งค่า</a></li></ul></div></div></nav>
+`,
+    // --- CODES (No changes needed from previous) ---
     'codes.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการโค้ดรับของ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>body{padding-top:70px;background-color:#f8f9fa}.code-list{max-height:60vh;overflow-y:auto}.code-item{font-family:monospace;word-break:break-all}</style></head><body><%- include('navbar', { pageTitle: 'Redemption Codes' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-key-fill"></i> จัดการโค้ดรับของ (<%= codes.length %> โค้ด)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCodeModal"><i class="bi bi-plus-circle"></i> เพิ่ม/สร้างโค้ด</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%= error %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-header bg-light">รายการโค้ด (32 ตัวอักษร A-Z, 0-9)</div><div class="card-body"><% if(codes.length > 0){ %><div class="code-list border rounded p-3 mb-3"><ul class="list-group list-group-flush"><% codes.forEach(code => { %><li class="list-group-item d-flex justify-content-between align-items-center"><span class="code-item"><%= code %></span><form method="POST" action="/admin/codes/delete/<%= code %>" class="ms-2 d-inline"><button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('ยืนยันลบโค้ด: <%= code %> ?')" title="ลบโค้ดนี้"><i class="bi bi-trash3"></i></button></form></li><% }) %></ul></div><p class="text-muted small">โค้ดที่ใช้แล้วจะถูกลบอัตโนมัติเมื่อลูกค้าใช้งานสำเร็จ</p><% } else { %><p class="text-center text-muted py-3">ยังไม่มีโค้ดรับของในระบบ</p><% } %></div></div></div><!-- Add Code Modal --><div class="modal fade" id="addCodeModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><form method="POST" action="/admin/codes/add"><div class="modal-header"><h5 class="modal-title">เพิ่ม หรือ สร้างโค้ด</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label for="manualCode" class="form-label">เพิ่มโค้ดเอง (32 ตัว)</label><input type="text" name="code" id="manualCode" class="form-control text-uppercase" pattern="[A-Z0-9]{32}" title="ต้องเป็น A-Z หรือ 0-9 จำนวน 32 ตัว" placeholder="เว้นว่างเพื่อสร้างอัตโนมัติ"><div class="form-text">ต้องเป็น A-Z, 0-9 จำนวน 32 ตัวเท่านั้น.</div></div><hr><div class="mb-3"><label for="generateCount" class="form-label">สร้างอัตโนมัติ (จำนวน)</label><input type="number" name="count" id="generateCount" class="form-control" min="1" max="1000" value="10"><div class="form-text">ระบุจำนวน (1-1000) ระบบจะสร้างให้หากช่องบนเว้นว่าง</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่ม/สร้าง</button></div></form></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=document.querySelector('.alert-success'),e=document.querySelector('.alert-danger');t&&setTimeout(()=>{try{new bootstrap.Alert(t).close()}catch(t){}},7e3),e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},1e4)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการโค้ดรับของ - ระบบจัดการร้านค้า</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style> body { padding-top: 70px; background-color: #f8f9fa; } .code-list { max-height: 60vh; overflow-y: auto; } .code-item { font-family: monospace; word-break: break-all; } </style></head><body><%- include('navbar') %><div class="container mt-4"> <div class="d-flex justify-content-between align-items-center mb-3"> <h2><i class="bi bi-key-fill"></i> จัดการโค้ดรับของ (<%= codes.length %> โค้ดที่ใช้งานได้)</h2> <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCodeModal"><i class="bi bi-plus-circle"></i> เพิ่ม/สร้างโค้ด</button> </div> <% if (typeof message !== 'undefined' && message) { %> <div class="alert alert-info alert-dismissible fade show" role="alert"> <i class="bi bi-info-circle-fill"></i> <%= message %> <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button> </div> <% } %> <div class="card shadow-sm"> <div class="card-header bg-light"> รายการโค้ด (32 ตัวอักษร) </div> <div class="card-body"> <% if (codes.length > 0) { %> <div class="code-list border rounded p-3 mb-3"> <ul class="list-group list-group-flush"> <% codes.forEach(code => { %> <li class="list-group-item d-flex justify-content-between align-items-center"> <span class="code-item"><%= code %></span> <form method="POST" action="/admin/codes/delete/<%= code %>" class="ms-2"> <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('ยืนยันลบโค้ด: <%= code %> ?')" title="ลบโค้ดนี้"> <i class="bi bi-trash3"></i> </button> </form> </li> <% }) %> </ul> </div> <p class="text-muted small">โค้ดที่ถูกใช้งานแล้วจะถูกลบออกจากรายการนี้โดยอัตโนมัติ</p> <% } else { %> <p class="text-center text-muted py-3">ยังไม่มีโค้ดรับของที่ใช้งานได้ในระบบ</p> <% } %> </div> </div></div> <!-- Add Code Modal --> <div class="modal fade" id="addCodeModal" tabindex="-1" aria-labelledby="addCodeModalLabel" aria-hidden="true"> <div class="modal-dialog"> <div class="modal-content"> <form method="POST" action="/admin/codes/add"> <div class="modal-header"> <h5 class="modal-title" id="addCodeModalLabel">เพิ่ม หรือ สร้างโค้ดรับของ</h5> <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button> </div> <div class="modal-body"> <div class="mb-3"> <label for="manualCode" class="form-label">เพิ่มโค้ดด้วยตนเอง (32 ตัวอักษร)</label> <input type="text" name="code" id="manualCode" class="form-control" pattern="[a-zA-Z0-9]{32}" maxlength="32" title="ต้องเป็นตัวอักษรภาษาอังกฤษหรือตัวเลข 32 ตัว" placeholder="เว้นว่างเพื่อสร้างอัตโนมัติ"> <div class="form-text">หากระบุโค้ดนี้ ระบบจะไม่สร้างโค้ดให้อัตโนมัติ (แนะนำตัวพิมพ์ใหญ่/ตัวเลข)</div> </div> <hr> <div class="mb-3"> <label for="generateCount" class="form-label">สร้างโค้ดอัตโนมัติ (จำนวน)</label> <input type="number" name="count" id="generateCount" class="form-control" min="1" max="1000" value="10"> <div class="form-text">ระบุจำนวนโค้ดที่ต้องการสร้าง (1-1000) ระบบจะสร้างให้หากช่องด้านบนเว้นว่าง</div> </div> </div> <div class="modal-footer"> <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button> <button type="submit" class="btn btn-primary">เพิ่ม/สร้างโค้ด</button> </div> </form> </div> </div> </div> <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> <script> document.addEventListener('DOMContentLoaded', function() { const alertElement = document.querySelector('.alert-info'); if(alertElement){ const alert = new bootstrap.Alert(alertElement); setTimeout(() => { alert.close(); }, 7000); } }); </script></body></html>
 `,
+    // --- NEW: SETTINGS Template ---
     'settings.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ตั้งค่าระบบ - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>body{padding-top:70px;background-color:#f8f9fa}textarea{font-family:monospace}.form-text{font-size:.875em}.form-check-input:checked{background-color:#198754;border-color:#198754}.alert i { vertical-align: -0.125em; } </style></head><body><%- include('navbar', { pageTitle: 'Settings' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-gear-wide-connected"></i> ตั้งค่าระบบ</h2></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%- error.replace(/\\\\n/g, '<br>') %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><form method="POST" action="/admin/settings/save"><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-facebook"></i> Facebook Messenger</strong></div><div class="card-body"><!-- Connection Status --><div id="connection-status" class="alert alert-<%= connectionStatus.status === 'success' ? 'success' : 'danger' %>" role="alert"><strong>สถานะเชื่อมต่อ Facebook:</strong> <%= connectionStatus.message %></div><div class="row"><div class="col-md-6 mb-3"><label for="fbVerifyToken" class="form-label">Verify Token*</label><input type="text" class="form-control" id="fbVerifyToken" name="fbVerifyToken" value="<%= config.fbVerifyToken %>" required><div class="form-text">ต้องตรงกับที่ตั้งใน Facebook App Webhook setup</div></div><div class="col-md-6 mb-3"><label for="adminContactLink" class="form-label">ลิงก์ติดต่อแอดมิน</label><input type="url" class="form-control" id="adminContactLink" name="adminContactLink" value="<%= config.adminContactLink %>" placeholder="https://m.me/YOUR_PAGE_ID"><div class="form-text">ลิงก์ m.me สำหรับปุ่มติดต่อแอดมิน (ถ้ามี)</div></div></div><div class="mb-3"><label for="fbPageAccessToken" class="form-label">Page Access Token</label><textarea class="form-control" id="fbPageAccessToken" name="fbPageAccessToken" rows="3"><%= config.fbPageAccessToken %></textarea><div class="form-text">Token ที่สร้างจาก Facebook App สำหรับเพจของคุณ (ควรใช้แบบอายุยาว)</div></div><div class="mb-3"><label for="welcomeGif" class="form-label">Welcome GIF URL</label><input type="url" class="form-control" id="welcomeGif" name="welcomeGif" value="<%= config.welcomeGif %>"><div class="form-text">URL รูป GIF ต้อนรับ (แนะนำ .gif ขนาดไม่ใหญ่มาก)</div></div></div></div><!-- Server Settings --><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-hdd-network-fill"></i> Server & Connection</strong> <small>(**ต้องรีสตาร์ทเซิร์ฟเวอร์** หากแก้ไขส่วนนี้)</small></div><div class="card-body"><div class="row"><div class="col-md-4 mb-3"><label for="serverPort" class="form-label">Server Port*</label><input type="number" class="form-control" id="serverPort" name="serverPort" value="<%= config.serverPort %>" min="1" max="65535" required><div class="form-text">Port ที่เซิร์ฟเวอร์จะทำงาน (เช่น 3000 หรือ 8443)</div></div><div class="col-md-8 mb-3 align-self-center"><div class="form-check form-switch pt-3"><input class="form-check-input" type="checkbox" role="switch" id="enableHttps" name="enableHttps" <%= config.enableHttps ? 'checked' : '' %>><label class="form-check-label" for="enableHttps">เปิดใช้งาน HTTPS (แนะนำ)</label></div></div></div><div class="row"><div class="col-md-6 mb-3"><label for="sslKeyPath" class="form-label">SSL Private Key Path (.pem)</label><input type="text" class="form-control" id="sslKeyPath" name="sslKeyPath" value="<%= config.sslKeyPath %>" placeholder="/path/to/your/privkey.pem" <%= !config.enableHttps ? 'disabled' : '' %>><div class="form-text">ที่อยู่ไฟล์ Private Key (จำเป็นหากเปิด HTTPS)</div></div><div class="col-md-6 mb-3"><label for="sslCertPath" class="form-label">SSL Certificate Path (.pem)</label><input type="text" class="form-control" id="sslCertPath" name="sslCertPath" value="<%= config.sslCertPath %>" placeholder="/path/to/your/fullchain.pem" <%= !config.enableHttps ? 'disabled' : '' %>><div class="form-text">ที่อยู่ไฟล์ Certificate Chain (จำเป็นหากเปิด HTTPS)</div></div></div><div class="alert alert-warning small p-2"><i class="bi bi-exclamation-triangle-fill"></i> การเปลี่ยนแปลง Port หรือ HTTPS **ต้องรีสตาร์ทเซิร์ฟเวอร์** เพื่อให้มีผลสมบูรณ์</div></div></div><!-- AI Chat Settings --><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-robot"></i> AI Chat (ตอบคำถามอัตโนมัติ)</strong></div><div class="card-body"><div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="aiChatEnabled" name="aiChatEnabled" <%= config.aiChatEnabled ? 'checked' : '' %>><label class="form-check-label" for="aiChatEnabled">เปิดใช้งาน AI Chat</label></div><div class="row"><div class="col-md-6 mb-3"><label for="aiApiKey" class="form-label">AI API Key</label><input type="password" class="form-control" id="aiApiKey" name="aiApiKey" value="<%= config.aiApiKey %>" placeholder="ใส่ API Key (จำเป็นหากเปิดใช้งาน)" <%= !config.aiChatEnabled ? 'disabled' : '' %>><div class="form-text">API Key จากผู้ให้บริการ AI (เช่น Easy-Peasy AI). <strong>ต้องระบุหากเปิดใช้งาน.</strong></div></div><div class="col-md-6 mb-3"><label for="aiApiUrl" class="form-label">AI API URL</label><input type="url" class="form-control" id="aiApiUrl" name="aiApiUrl" value="<%= config.aiApiUrl %>" placeholder="https://... (จำเป็นหากเปิดใช้งาน)" <%= !config.aiChatEnabled ? 'disabled' : '' %>><div class="form-text">URL ของ Endpoint AI Chat API. <strong>ต้องระบุหากเปิดใช้งาน.</strong></div></div></div><div class="alert alert-info small p-2"><i class="bi bi-info-circle"></i> หากเปิดใช้งาน บอทจะพยายามตอบคำถามทั่วไปที่ไม่ได้อยู่ในคำสั่งหลักโดยใช้ AI</div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-megaphone-fill"></i> โปรโมชั่นอัตโนมัติ (ลดทั้งร้าน)</strong></div><div class="card-body"><div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="autoPromotionEnabled" name="autoPromotionEnabled" <%= config.autoPromotionEnabled ? 'checked' : '' %>><label class="form-check-label" for="autoPromotionEnabled">เปิดใช้งานโปรโมชั่นอัตโนมัติ</label></div><div class="row"><div class="col-md-6 mb-3"><label for="autoPromotionPercentage" class="form-label">เปอร์เซ็นต์ส่วนลด (%)</label><input type="number" class="form-control" id="autoPromotionPercentage" name="autoPromotionPercentage" value="<%= config.autoPromotionPercentage %>" min="0" max="100" step="0.1"><div class="form-text">ใส่ค่าระหว่าง 0-100 (เช่น 10 สำหรับ 10%)</div></div><div class="col-md-6 mb-3"><label for="autoPromotionMinPurchase" class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" class="form-control" id="autoPromotionMinPurchase" name="autoPromotionMinPurchase" value="<%= config.autoPromotionMinPurchase %>" min="0" step="0.01"><div class="form-text">ยอดซื้อขั้นต่ำในตะกร้าเพื่อรับส่วนลด (0 = ไม่มีขั้นต่ำ)</div></div></div><div class="alert alert-info small p-2"><i class="bi bi-info-circle"></i> หากเปิดใช้งาน ลูกค้าที่มียอดถึงขั้นต่ำจะได้รับส่วนลดนี้ทันที และจะไม่สามารถใช้โค้ดส่วนลดอื่นได้</div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-wallet2"></i> TrueMoney Wallet (Angpao)</strong></div><div class="card-body"><div class="row"><div class="col-md-6 mb-3"><label for="walletPhone" class="form-label">เบอร์ Wallet ร้านค้า (สำหรับรับซอง)*</label><input type="text" class="form-control" id="walletPhone" name="walletPhone" value="<%= config.walletPhone %>" pattern="[0-9]{10}" title="ใส่เบอร์โทรศัพท์ 10 หลัก" required><div class="form-text"><strong>สำคัญ:</strong> เบอร์ TrueMoney ที่บอทใช้กดรับเงินจากซองอั่งเปาที่ลูกค้าส่งมา</div></div><div class="col-md-6 mb-3"><label for="walletImage" class="form-label">Wallet Image URL</label><input type="url" class="form-control" id="walletImage" name="walletImage" value="<%= config.walletImage %>"><div class="form-text">URL รูปภาพสำหรับตัวเลือกจ่ายผ่าน Wallet</div></div></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-bank"></i> Bank Transfer</strong></div><div class="card-body"><div class="mb-3"><label for="bankAccountDetails" class="form-label">ข้อมูลบัญชีธนาคาร*</label><textarea class="form-control" id="bankAccountDetails" name="bankAccountDetails" rows="4" required><%= config.bankAccountDetails %></textarea><div class="form-text">แสดงให้ลูกค้าเห็นตอนเลือกโอนเงิน (ใส่ ธนาคาร, เลขบัญชี, ชื่อบัญชี)</div></div><div class="mb-3"><label for="bankImage" class="form-label">Bank Logo Image URL</label><input type="url" class="form-control" id="bankImage" name="bankImage" value="<%= config.bankImage %>"><div class="form-text">URL รูปโลโก้ธนาคาร</div></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-receipt"></i> Xncly Slip Check API</strong> <small>(สำหรับ Bank Transfer)</small></div><div class="card-body"><div class="mb-3"><label for="xnclyClientIdSecret" class="form-label">Xncly ClientID:Secret</label><input type="text" class="form-control" id="xnclyClientIdSecret" name="xnclyClientIdSecret" value="<%= config.xnclyClientIdSecret %>" placeholder="ClientID:Secret"><div class="form-text">รูปแบบ ClientID:Secret จาก <a href="https://xncly.xyz/" target="_blank">xncly.xyz</a> (จำเป็นหากใช้โอนเงิน)</div></div><div class="mb-3"><label for="xnclyCheckUrl" class="form-label">Xncly Check URL*</label><input type="url" class="form-control" id="xnclyCheckUrl" name="xnclyCheckUrl" value="<%= config.xnclyCheckUrl %>" required></div></div></div><div class="card shadow-sm mb-4"><div class="card-header"><strong><i class="bi bi-key-fill"></i> Code Redemption & <i class="bi bi-percent"></i> Discounts Images</strong></div><div class="card-body"><div class="row"><div class="col-md-6 mb-3"><label for="codeRedemptionImage" class="form-label">Code Redemption Image URL</label><input type="url" class="form-control" id="codeRedemptionImage" name="codeRedemptionImage" value="<%= config.codeRedemptionImage %>"><div class="form-text">URL รูปภาพสำหรับตัวเลือกใช้โค้ดรับของ</div></div><div class="col-md-6 mb-3"><label for="discountImage" class="form-label">Discount Feature Image URL</label><input type="url" class="form-control" id="discountImage" name="discountImage" value="<%= config.discountImage %>"><div class="form-text">URL รูปภาพ (อาจใช้แสดงผลเกี่ยวกับส่วนลด)</div></div></div></div></div><div class="text-center mb-4"><button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-save-fill"></i> บันทึกการตั้งค่าทั้งหมด</button></div></form></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded', function() { const httpsSwitch = document.getElementById('enableHttps'); const keyPathInput = document.getElementById('sslKeyPath'); const certPathInput = document.getElementById('sslCertPath'); const aiSwitch = document.getElementById('aiChatEnabled'); const aiKeyInput = document.getElementById('aiApiKey'); const aiUrlInput = document.getElementById('aiApiUrl'); function toggleSslInputs() { const isEnabled = httpsSwitch.checked; keyPathInput.disabled = !isEnabled; certPathInput.disabled = !isEnabled; keyPathInput.required = isEnabled; // Only required if HTTPS is on certPathInput.required = isEnabled; } function toggleAiInputs() { const isEnabled = aiSwitch.checked; aiKeyInput.disabled = !isEnabled; aiUrlInput.disabled = !isEnabled; aiKeyInput.required = isEnabled; // Only required if AI is on aiUrlInput.required = isEnabled; } httpsSwitch.addEventListener('change', toggleSslInputs); aiSwitch.addEventListener('change', toggleAiInputs); toggleSslInputs(); // Initial check toggleAiInputs(); // Initial check for AI fields const successAlert = document.querySelector('.alert-success'); const errorAlert = document.querySelector('.alert-danger'); if (successAlert) { setTimeout(() => { try { new bootstrap.Alert(successAlert).close(); } catch (e) {} }, 7000); } if (errorAlert) { setTimeout(() => { try { new bootstrap.Alert(errorAlert).close(); } catch (e) {} }, 15000); } });</script></body></html>
-`,
-    'discounts.ejs': `
-<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>จัดการโค้ดส่วนลด - Admin</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style>th,td{vertical-align:middle;font-size:.9rem}body{padding-top:70px;background-color:#f8f9fa}.btn-action form{display:inline}.form-text{font-size:.875em}.code-input{text-transform:uppercase;font-family:monospace}.expired{color:#6c757d; text-decoration: line-through;}.used-up{color:#6c757d; font-style: italic;}</style></head><body><%- include('navbar', { pageTitle: 'Discount Codes' }) %><div class="container mt-4"><div class="d-flex justify-content-between align-items-center mb-3"><h2><i class="bi bi-percent"></i> จัดการโค้ดส่วนลด (<%= discounts.length %> รายการ)</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addDiscountModal"><i class="bi bi-plus-circle"></i> เพิ่มโค้ดส่วนลด</button></div><!-- Display Messages/Errors --><% if (typeof message !== 'undefined' && message) { %><div class="alert alert-success alert-dismissible fade show" role="alert"><i class="bi bi-check-circle-fill"></i> <%= message %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><% if (typeof error !== 'undefined' && error) { %><div class="alert alert-danger alert-dismissible fade show" role="alert"><i class="bi bi-exclamation-triangle-fill"></i> <%- error.replace(/\\\\n/g, '<br>') %><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button></div><% } %><div class="card shadow-sm"><div class="card-body p-0"><div class="table-responsive"><table class="table table-striped table-hover mb-0"><thead class="table-light"><tr><th>โค้ด</th><th>ประเภท</th><th>มูลค่า</th><th>ใช้ไป/จำกัด</th><th>ซื้อขั้นต่ำ(฿)</th><th>วันหมดอายุ</th><th>จัดการ</th></tr></thead><tbody><% if(discounts.length > 0){ %><% discounts.forEach(discount => { const isExpired = discount.expiresAt && new Date(discount.expiresAt) < new Date(); const isUsedUp = discount.maxUses !== null && (discount.uses || 0) >= discount.maxUses; const isInactive = isExpired || isUsedUp; const modalId = "editDiscountModal" + discount.id.replace(/[^a-zA-Z0-9]/g, ''); %><tr><td class="<%= isInactive ? 'text-muted' : '' %> <%= isExpired ? 'expired' : (isUsedUp ? 'used-up' : '') %>"><%= discount.code %><% if (isExpired){ %><span class="badge bg-secondary ms-1">หมดอายุ</span><% } else if (isUsedUp){ %><span class="badge bg-secondary ms-1">ใช้ครบ</span><% } %></td><td class="text-capitalize"><%= discount.type %></td><td><%= discount.type === 'percentage' ? discount.value + '%' : '฿' + discount.value.toFixed(2) %></td><td><%= discount.uses || 0 %> / <%= discount.maxUses === null ? '∞' : discount.maxUses %></td><td><%= discount.minPurchase > 0 ? discount.minPurchase.toFixed(2) : '-' %></td><td><%= discount.expiresAt ? new Date(discount.expiresAt).toLocaleDateString('th-TH', { year:'numeric', month:'short', day:'numeric'}) : '-' %></td><td class="text-center btn-action"><button class="btn btn-sm btn-warning me-1" data-bs-toggle="modal" data-bs-target="#<%= modalId %>" title="แก้ไข"><i class="bi bi-pencil-square"></i></button><form method="POST" action="/admin/discounts/delete/<%= discount.id %>" class="d-inline"><button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('ยืนยันลบโค้ดส่วนลด: <%= discount.code %> ?')" title="ลบ"><i class="bi bi-trash3"></i></button></form></td></tr><% }) %><% } else { %><tr><td colspan="7" class="text-center text-muted py-3">ยังไม่มีโค้ดส่วนลดในระบบ</td></tr><% } %></tbody></table></div></div></div></div><!-- Add Discount Modal --><div class="modal fade" id="addDiscountModal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/discounts/add"><div class="modal-header"><h5 class="modal-title">เพิ่มโค้ดส่วนลดใหม่</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label for="addCode" class="form-label">โค้ดส่วนลด*</label><input type="text" name="code" id="addCode" class="form-control code-input" required pattern="[A-Z0-9]{3,20}" title="3-20 ตัวอักษร A-Z หรือ 0-9 เท่านั้น"><div class="form-text">ตัวพิมพ์เล็กจะถูกแปลงเป็นพิมพ์ใหญ่ (3-20 ตัวอักษร)</div></div><div class="row"><div class="col-md-6 mb-3"><label for="addType" class="form-label">ประเภทส่วนลด*</label><select name="type" id="addType" class="form-select" required><option value="percentage" selected>เปอร์เซ็นต์ (%)</option><option value="fixed">จำนวนเงินคงที่ (฿)</option></select></div><div class="col-md-6 mb-3"><label for="addValue" class="form-label">มูลค่าส่วนลด*</label><input type="number" name="value" id="addValue" class="form-control" required step="any" min="0.01"><div class="form-text">เช่น 10 สำหรับ 10% หรือ 50 สำหรับ ฿50 (ต้องมากกว่า 0)</div></div></div><div class="row"><div class="col-md-4 mb-3"><label for="addMaxUses" class="form-label">จำนวนครั้งที่ใช้ได้สูงสุด</label><input type="number" name="maxUses" id="addMaxUses" class="form-control" min="1" placeholder="เว้นว่าง=ไม่จำกัด"></div><div class="col-md-4 mb-3"><label for="addMinPurchase" class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" name="minPurchase" id="addMinPurchase" class="form-control" step="0.01" min="0" value="0" placeholder="0 หรือเว้นว่าง=ไม่มีขั้นต่ำ"></div><div class="col-md-4 mb-3"><label for="addExpiresAt" class="form-label">วันหมดอายุ</label><input type="date" name="expiresAt" id="addExpiresAt" class="form-control"><div class="form-text">เว้นว่าง=ไม่มีหมดอายุ</div></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">เพิ่มโค้ด</button></div></form></div></div></div><!-- Edit Discount Modals --><% discounts.forEach(discount => { const expiresValue = discount.expiresAt ? new Date(discount.expiresAt).toISOString().split('T')[0] : ''; const modalId = "editDiscountModal" + discount.id.replace(/[^a-zA-Z0-9]/g, ''); %><div class="modal fade" id="<%= modalId %>" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg"><div class="modal-content"><form method="POST" action="/admin/discounts/edit/<%= discount.id %>"><div class="modal-header"><h5 class="modal-title">แก้ไขโค้ด: <%= discount.code %></h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">โค้ดส่วนลด*</label><input type="text" name="code" class="form-control code-input" value="<%= discount.code %>" required pattern="[A-Z0-9]{3,20}" title="3-20 ตัวอักษร A-Z หรือ 0-9 เท่านั้น"></div><div class="row"><div class="col-md-6 mb-3"><label class="form-label">ประเภทส่วนลด*</label><select name="type" class="form-select" required><option value="percentage" <%= discount.type === 'percentage' ? 'selected' : '' %>>เปอร์เซ็นต์ (%)</option><option value="fixed" <%= discount.type === 'fixed' ? 'selected' : '' %>>จำนวนเงินคงที่ (฿)</option></select></div><div class="col-md-6 mb-3"><label class="form-label">มูลค่าส่วนลด*</label><input type="number" name="value" class="form-control" value="<%= discount.value %>" required step="any" min="0.01"></div></div><div class="row"><div class="col-md-4 mb-3"><label class="form-label">จำนวนครั้งที่ใช้ได้สูงสุด</label><input type="number" name="maxUses" class="form-control" value="<%= discount.maxUses || '' %>" min="1" placeholder="เว้นว่าง=ไม่จำกัด"><div class="form-text">ใช้ไปแล้ว: <%= discount.uses || 0 %> ครั้ง</div></div><div class="col-md-4 mb-3"><label class="form-label">ยอดซื้อขั้นต่ำ (฿)</label><input type="number" name="minPurchase" class="form-control" value="<%= discount.minPurchase || '0' %>" step="0.01" min="0" placeholder="0=ไม่มีขั้นต่ำ"></div><div class="col-md-4 mb-3"><label class="form-label">วันหมดอายุ</label><input type="date" name="expiresAt" class="form-control" value="<%= expiresValue %>"><div class="form-text">เว้นว่าง=ไม่มีหมดอายุ</div></div></div><p class="small text-muted">ID: <%= discount.id %><br>Created: <%= new Date(discount.createdAt).toLocaleString('th-TH') %></p></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button><button type="submit" class="btn btn-primary">บันทึกการเปลี่ยนแปลง</button></div></form></div></div></div><% }) %><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script><script>document.addEventListener('DOMContentLoaded',function(){const t=document.querySelector('.alert-success'),e=document.querySelector('.alert-danger');t&&setTimeout(()=>{try{new bootstrap.Alert(t).close()}catch(t){}},7e3),e&&setTimeout(()=>{try{new bootstrap.Alert(e).close()}catch(t){}},15e3)});</script></body></html>
+<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ตั้งค่าระบบ - ระบบจัดการร้านค้า</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><style> body { padding-top: 70px; background-color: #f8f9fa; } .form-label { font-weight: 500; } .card + .card { margin-top: 1.5rem; } .form-text { font-size: 0.875em; } </style></head><body><%- include('navbar') %><div class="container mt-4 mb-5"><div class="d-flex justify-content-between align-items-center mb-3"> <h2><i class="bi bi-gear-fill"></i> ตั้งค่าระบบ</h2></div> <% if (typeof message !== 'undefined' && message) { %> <div class="alert alert-<%= typeof isError !== 'undefined' && isError ? 'danger' : 'success' %> alert-dismissible fade show" role="alert"> <i class="bi bi-<%= typeof isError !== 'undefined' && isError ? 'exclamation-triangle-fill' : 'check-circle-fill' %>"></i> <%= message %> <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button> </div> <% } %> <form method="POST" action="/admin/settings"> <div class="card shadow-sm mb-4"> <div class="card-header bg-light"> <h5><i class="bi bi-facebook"></i> Facebook Messenger Settings</h5> </div> <div class="card-body"> <div class="mb-3"> <label for="verifyToken" class="form-label">Verify Token*</label> <input type="text" class="form-control" id="verifyToken" name="verifyToken" value="<%= config.verifyToken %>" required minlength="5"> <div class="form-text">ตั้งค่าให้ตรงกับใน Facebook App Webhook settings.</div> </div> <div class="mb-3"> <label for="pageAccessToken" class="form-label">Page Access Token*</label> <textarea class="form-control" id="pageAccessToken" name="pageAccessToken" rows="3" required minlength="50"><%= config.pageAccessToken %></textarea> <div class="form-text">Token การเข้าถึงเพจ (ควรสร้างแบบ non-expiring).</div> </div> </div> </div> <div class="card shadow-sm mb-4"> <div class="card-header bg-light"> <h5><i class="bi bi-wallet2"></i> TrueMoney Wallet Settings</h5> </div> <div class="card-body"> <div class="mb-3"> <label for="walletPhone" class="form-label">เบอร์ Wallet ผู้รับ*</label> <input type="tel" class="form-control" id="walletPhone" name="walletPhone" value="<%= config.walletPhone %>" required pattern="\\d{9,10}" title="ใส่เฉพาะตัวเลข 9-10 หลัก"> <div class="form-text">เบอร์ TrueMoney Wallet สำหรับรับซองอั่งเปา (ไม่แสดงให้ผู้ใช้เห็น).</div> </div> <div class="mb-3"> <label for="walletImage" class="form-label">URL รูปภาพ Wallet</label> <input type="url" class="form-control image-url-input" id="walletImage" name="walletImage" value="<%= config.walletImage %>" placeholder="https://..."> <img src="<%= config.walletImage %>" class="image-preview" style="<%= config.walletImage ? 'display:block;' : '' %>"> <div class="form-text">URL รูปภาพโลโก้ Wallet สำหรับแสดงในตัวเลือกชำระเงิน.</div> </div> </div> </div> <div class="card shadow-sm mb-4"> <div class="card-header bg-light"> <h5><i class="bi bi-bank"></i> Bank Transfer Settings</h5> </div> <div class="card-body"> <div class="mb-3"> <label for="bankAccountDetails" class="form-label">ข้อมูลบัญชีธนาคาร*</label> <textarea class="form-control" id="bankAccountDetails" name="bankAccountDetails" rows="4" required minlength="10"><%= config.bankAccountDetails %></textarea> <div class="form-text">ข้อมูลบัญชีสำหรับให้ลูกค้าโอนเงิน (รองรับหลายบรรทัด).</div> </div> <div class="mb-3"> <label for="bankImage" class="form-label">URL รูปภาพ ธนาคาร</label> <input type="url" class="form-control image-url-input" id="bankImage" name="bankImage" value="<%= config.bankImage %>" placeholder="https://..."> <img src="<%= config.bankImage %>" class="image-preview" style="<%= config.bankImage ? 'display:block;' : '' %>"> <div class="form-text">URL รูปภาพโลโก้ธนาคาร สำหรับแสดงในตัวเลือกชำระเงิน.</div> </div> </div> </div> <div class="card shadow-sm mb-4"> <div class="card-header bg-light"> <h5><i class="bi qr-code"></i> Xncly Slip Check API Settings</h5> </div> <div class="card-body"> <div class="mb-3"> <label for="xnclyClientIdSecret" class="form-label">ClientID:Secret*</label> <input type="text" class="form-control" id="xnclyClientIdSecret" name="xnclyClientIdSecret" value="<%= config.xnclyClientIdSecret %>" required pattern="^[^:]+:[^:]+$" title="รูปแบบ ClientID:Secret คั่นด้วย :"> <div class="form-text">ข้อมูล Credential จาก <a href="https://xncly.xyz/" target="_blank">Xncly</a>.</div> </div> <div class="mb-3"> <label for="xnclyCheckUrl" class="form-label">API Check URL*</label> <input type="url" class="form-control" id="xnclyCheckUrl" name="xnclyCheckUrl" value="<%= config.xnclyCheckUrl %>" required placeholder="https://..."> <div class="form-text">URL สำหรับ Endpoint ตรวจสอบสลิปของ Xncly.</div> </div> </div> </div> <div class="card shadow-sm mb-4"> <div class="card-header bg-light"> <h5><i class="bi bi-image-fill"></i> Other Image URLs</h5> </div> <div class="card-body"> <div class="mb-3"> <label for="welcomeGif" class="form-label">Welcome GIF URL</label> <input type="url" class="form-control image-url-input" id="welcomeGif" name="welcomeGif" value="<%= config.welcomeGif %>" placeholder="https://..."> <img src="<%= config.welcomeGif %>" class="image-preview" style="<%= config.welcomeGif ? 'display:block;' : '' %>"> <div class="form-text">URL รูปภาพ GIF ต้อนรับเมื่อเริ่มแชท หรือดูหมวดหมู่.</div> </div> <div class="mb-3"> <label for="codeRedemptionImage" class="form-label">Code Redemption Image URL</label> <input type="url" class="form-control image-url-input" id="codeRedemptionImage" name="codeRedemptionImage" value="<%= config.codeRedemptionImage %>" placeholder="https://..."> <img src="<%= config.codeRedemptionImage %>" class="image-preview" style="<%= config.codeRedemptionImage ? 'display:block;' : '' %>"> <div class="form-text">URL รูปภาพสำหรับตัวเลือก "ใช้โค้ดรับของ".</div> </div> </div> </div> <div class="text-end mb-4"> <button type="submit" class="btn btn-primary btn-lg"><i class="bi bi-save"></i> บันทึกการตั้งค่า</button> </div> </form> <div class="alert alert-secondary small" role="alert"> <i class="bi bi-info-circle"></i> การตั้งค่า SSL (HTTPS) และ Port ยังคงต้องกำหนดค่าโดยตรงในไฟล์สคริปต์หรือ Environment Variables. </div></div> <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script> <script> document.addEventListener('DOMContentLoaded', function() { const setupPreview = (modalOrPage) => { modalOrPage.querySelectorAll('.image-url-input').forEach(urlInput => { const preview = urlInput.nextElementSibling; // Assumes img is right after input if (!preview || preview.tagName !== 'IMG') return; const update = () => { const url = urlInput.value.trim(); const isValid = url && (url.startsWith('data:image/') || /^(https?:\/\/).+\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(url)); if (isValid) { preview.src = url; preview.style.display = 'block'; urlInput.classList.remove('is-invalid'); } else { preview.style.display = 'none'; preview.src=''; if (url && url !== 'https://...') { urlInput.classList.add('is-invalid'); } else { urlInput.classList.remove('is-invalid'); } }}; urlInput.addEventListener('input', update); update(); }); }; setupPreview(document.body); // Setup for the whole page const alertElement = document.querySelector('.alert-success, .alert-danger'); if(alertElement){ const alert = new bootstrap.Alert(alertElement); setTimeout(() => { alert.close(); }, 7000); } }); </script></body></html>
 `
 };
 
+// Write templates to files
 Object.entries(templates).forEach(([filename, content]) => {
     const filepath = path.join(viewsDir, filename);
     try {
         fs.mkdirSync(path.dirname(filepath), { recursive: true });
-        // Only write if content differs, prevents unnecessary file timestamp changes
-        let existingContent = '';
-        if (fs.existsSync(filepath)) {
-            existingContent = fs.readFileSync(filepath, 'utf8');
-        }
-        const newContent = content.trim();
-        if (existingContent !== newContent) {
-            fs.writeFileSync(filepath, newContent, 'utf8');
-            console.log(`Admin template '${filename}' created/updated.`);
-        }
-    } catch (error) {
-        console.error(`Error writing template ${filename}:`, error);
-    }
+        fs.writeFileSync(filepath, content.trim(), 'utf8');
+        console.log(`Admin template '${filename}' created/updated.`);
+    } catch (error) { console.error(`Error writing template ${filename}:`, error); }
 });
 // --- End EJS Setup ---
 
-// --- Server Startup Logic ---
-function startServer() {
-    const PORT = loadedConfig.serverPort;
-    let useHttps = loadedConfig.enableHttps;
-    let credentials = null;
 
-    if (useHttps) {
-        try {
-            if (!loadedConfig.sslKeyPath || !loadedConfig.sslCertPath) {
-                throw new Error("SSL Key Path or Cert Path is missing in config.");
-            }
-            // Check read access first
-            fs.accessSync(loadedConfig.sslKeyPath, fs.constants.R_OK);
-            fs.accessSync(loadedConfig.sslCertPath, fs.constants.R_OK);
-            const privateKey = fs.readFileSync(loadedConfig.sslKeyPath, 'utf8');
-            const certificate = fs.readFileSync(loadedConfig.sslCertPath, 'utf8');
-            credentials = { key: privateKey, cert: certificate };
-            console.log("SSL certificates loaded successfully from configured paths.");
-        } catch (error) {
-            console.warn(`---------------------------------------------------`);
-            console.warn("⚠️ WARNING: Could not load SSL certificates.");
-            console.warn(`   Error: ${error.message}`);
-            console.warn(`   Key Path Attempted: ${loadedConfig.sslKeyPath}`);
-            console.warn(`   Cert Path Attempted: ${loadedConfig.sslCertPath}`);
-            console.warn("   Falling back to HTTP server.");
-            console.warn("   Verify paths and file permissions in /admin/settings and RESTART.");
-            console.warn(`---------------------------------------------------`);
-            useHttps = false;
-        }
-    }
+// --- Server Startup ---
+const PORT = process.env.PORT || (useHttps ? 8443 : 3000); // Port still needs env/direct edit
 
-    if (useHttps && credentials) {
-        serverInstance = https.createServer(credentials, app);
-        serverInstance.listen(PORT, () => {
-            // Try to guess domain from cert path for display purposes
-            const domainMatch = String(loadedConfig.sslCertPath).match(/live\/([^\/]+)\//);
-            const domain = domainMatch ? domainMatch[1] : 'YOUR_DOMAIN.COM';
-            console.log(`---------------------------------------------------`);
-            console.log(`✅ HTTPS Server running on port ${PORT}`);
-            console.log(`🔗 Admin Dashboard: https://${domain}:${PORT}/admin`);
-            console.log(`🔗 Webhook URL:     https://${domain}:${PORT}/webhook`);
-            console.log(`   (Verify Token in FB App: ${loadedConfig.fbVerifyToken})`);
-            console.log(`---------------------------------------------------`);
-        });
-    } else {
-        serverInstance = http.createServer(app);
-        serverInstance.listen(PORT, () => {
-            console.warn(`---------------------------------------------------`);
-            console.warn(`⚠️ Running HTTP server on port ${PORT}. HTTPS is highly recommended!`);
-            console.warn(`🔗 Admin Dashboard (HTTP): http://localhost:${PORT}/admin (or your server's IP)`);
-            console.warn(`🔗 Webhook URL (HTTP): Requires tunneling (e.g., ngrok) for Facebook.`);
-            console.warn(`   Example (ngrok): https://<your-ngrok-id>.ngrok-free.app/webhook`);
-            console.warn(`   (Verify Token in FB App: ${loadedConfig.fbVerifyToken})`);
-            console.warn(`   Configure HTTPS in /admin/settings for production & restart.`);
-            console.warn(`---------------------------------------------------`);
-        });
-    }
-
-    serverInstance.on('error', (error) => {
-        if (error.syscall !== 'listen') {
-            throw error;
-        }
-        const bind = typeof PORT === 'string' ? 'Pipe ' + PORT : 'Port ' + PORT;
-        switch (error.code) {
-            case 'EACCES':
-                console.error(`❌ FATAL ERROR: ${bind} requires elevated privileges (e.g., sudo for ports < 1024).`);
-                process.exit(1);
-                break;
-            case 'EADDRINUSE':
-                console.error(`❌ FATAL ERROR: ${bind} is already in use. Is another instance running?`);
-                process.exit(1);
-                break;
-            default:
-                console.error("❌ FATAL SERVER ERROR:", error);
-                process.exit(1);
-        }
+if (useHttps && credentials.key && credentials.cert) {
+    const httpsServer = https.createServer(credentials, app);
+    httpsServer.listen(PORT, () => {
+        const domain = privateKeyPath.split('/')[3] || 'your_domain.com'; // Attempt to get domain from path
+        console.log(`---------------------------------------------------`);
+        console.log(`✅ HTTPS Server running on port ${PORT}`);
+        console.log(`🔗 Admin Dashboard: https://${domain}:${PORT}/admin`); // Added port just in case it's not 443
+        console.log(`🔗 Webhook URL:     https://${domain}:${PORT}/webhook`);
+        console.log(`⚙️  Manage settings: https://${domain}:${PORT}/admin/settings`);
+        console.log(`---------------------------------------------------`);
     });
-
-    console.log(`ℹ️ Auto Promotion Status: ${loadedConfig.autoPromotionEnabled ? `ENABLED (${loadedConfig.autoPromotionPercentage}% over ${loadedConfig.autoPromotionMinPurchase} THB)` : 'DISABLED'}`);
-    console.log(`ℹ️ AI Chat Status: ${loadedConfig.aiChatEnabled ? `ENABLED (URL: ${loadedConfig.aiApiUrl})` : 'DISABLED'}`);
-
-    if (loadedConfig.fbVerifyToken === DEFAULT_CONFIG.fbVerifyToken || !loadedConfig.fbPageAccessToken || !loadedConfig.walletPhone || (!loadedConfig.xnclyClientIdSecret && loadedConfig.bankAccountDetails) || (loadedConfig.xnclyClientIdSecret && !loadedConfig.xnclyClientIdSecret.includes(':'))) {
-            console.warn("⚠️ WARNING: Essential FB/Payment settings missing or incomplete. Please configure via /admin/settings!");
-    }
-    if (loadedConfig.aiChatEnabled && (!loadedConfig.aiApiKey || !loadedConfig.aiApiUrl)) {
-            console.warn("⚠️ WARNING: AI Chat is enabled but API Key or URL is missing in /admin/settings!");
-    }
-    console.log(`---------------------------------------------------`);
+} else {
+    app.listen(PORT, () => {
+        console.warn(`---------------------------------------------------`);
+        console.warn(`⚠️ Running HTTP server on port ${PORT}. HTTPS is highly recommended!`);
+        console.warn(`🔗 Admin Dashboard (HTTP): http://localhost:${PORT}/admin`);
+        console.warn(`🔗 Webhook URL (HTTP): Needs tunneling (like ngrok) for Facebook.`);
+        console.warn(`⚙️  Manage settings (HTTP): http://localhost:${PORT}/admin/settings`);
+        console.warn(`---------------------------------------------------`);
+    });
 }
 
 // --- Initial File Creation Checks ---
 function createInitialFiles() {
+    // Create config.json if missing (will use defaults)
     if (!fs.existsSync(CONFIG_FILE)) {
-         console.log("Initial config.json will be created with default/detected values by loadConfig().");
+        console.log("Creating default config.json...");
+        saveConfig(); // Saves the initial default values
     }
+    // Create other data files if missing
+    if (!fs.existsSync(DATA_FILE)) saveShopData(); // Saves empty structure
+    if (!fs.existsSync(VERIFIED_SLIPS_FILE)) saveVerifiedSlips(); // Saves empty array
+    if (!fs.existsSync(REDEMPTION_CODES_FILE)) saveValidRedemptionCodes(); // Saves empty array
 
-    const filesToCreate = {
-        'package.json': () => JSON.stringify({
-            "name": "fb-messenger-shop-v5-2-0", // Updated version
-            "version": "5.2.0", // Updated version
-            "description": "Facebook Messenger Bot shop with Angpao (Redeem), Xncly Slip (transRef), Code Redemption, Quantity Stock, Manual & Auto Discounts, AI Chat, and full Web Config including Server/SSL.",
-            "main": "index.js",
-            "scripts": { "start": "node index.js" },
-            "dependencies": {
-                "axios": "^1.6.8",
-                "body-parser": "^1.20.2",
-                "ejs": "^3.1.9",
-                "express": "^4.18.3",
-                "form-data": "^4.0.0",
-                "request": "^2.88.2"
-            },
-            "engines": { "node": ">=16.0.0" }
-        }, null, 2),
-        'README.md': () => `# FB Messenger Shop Bot (v5.2.0 - AI Chat + Angpao Redeem + Slip transRef)\n\nFeatures:\n*   **NEW:** AI Chatbot for handling general user queries (toggleable, requires API key/URL).\n*   TrueMoney Angpao (**Auto Redeem via API** - requires shop wallet number in config)\n*   Bank Transfer (Xncly Slip Verification + **transRef Duplicate Check**)\n*   Code Redemption (32-char codes)\n*   Manual Discount Codes: Manage %/fixed discounts with limits, expiry, min purchase.\n*   Automatic Promotion: Configure store-wide % discount with min purchase.\n*   Quantity-Based Stock: Unique data per item consumed on purchase.\n*   **Full Web-Based Configuration (/admin/settings):**\n    *   Manage Tokens (FB Verify, Page Access), API Keys (Xncly, **AI Chat**).\n    *   Wallet/Bank Info.\n    *   Auto Promotion & **AI Chat** Settings.\n    *   **Server Port & HTTPS/SSL Configuration (Key/Cert Paths).**\n    *   Facebook Connection Status Check.\n*   Admin Dashboard: Manage products, categories, orders, redemption codes, manual discount codes, settings.\n\n## Setup\n\n1.  **Install:** ` + "`npm install`" + `\n2.  **Configure:**\n    *   Run the bot once (` + "`npm start`" + `) to generate initial \`config.json\` and other data files. It will try to detect default SSL certs to guess HTTPS.\n    *   Access the Admin Panel (URL shown in console, e.g., \`http://localhost:3000/admin\` or \`https://YOUR_DOMAIN:8443/admin\`).\n    *   Go to **Settings** (\`/admin/settings\`) and fill in ALL required fields. Pay special attention to:\n        *   Facebook Tokens (Verify & Page Access).\n        *   Payment Details:\n            *   **Wallet Phone:** *Required* for the bot to automatically redeem Angpao links.\n            *   Bank Info & Xncly Key (if using bank transfer).\n        *   **AI Chat:** Enable and provide API Key/URL if you want to use the AI feature.\n        *   **Server & Connection:** Set the desired Port. Enable HTTPS and provide **correct, full paths** to your SSL certificate (\`fullchain.pem\`) and private key (\`privkey.pem\`) files for production.\n    *   Configure Auto Promotion and add Manual Discount Codes (\`/admin/discounts\`) if needed.\n    *   **VERY IMPORTANT:** You **MUST RESTART** the bot (` + "`Ctrl+C`" + ` then ` + "`npm start`" + `) after saving any changes in the "Server & Connection" section (Port, HTTPS toggle, SSL Paths).\n    *   Other settings changes (like FB tokens, payment info, AI settings) usually take effect immediately or after a short delay (check FB Connection Status in settings).\n3.  **Facebook App:**\n    *   Setup Messenger Platform integration.\n    *   Add Webhook: URL from server startup logs (use HTTPS URL if enabled!), Verify Token from \`/admin/settings\`.\n    *   Subscribe to \`messages\`, \`messaging_postbacks\`.\n    *   Ensure Page Access Token matches.\n4.  **Add Content:** Use the admin panel to add categories, products (with stock items), and redemption codes.\n5.  **Run:** ` + "`npm start`" + `\n\n## Security\n\n**The admin panel (\`/admin\`) has NO built-in password protection.** Secure it yourself (e.g., using basic auth, IP filtering, Cloudflare Access, reverse proxy with auth). Do NOT expose it directly to the internet without protection.`,
-        '.gitignore': () => `node_modules\n*.log\n*.log.*\n\n# Sensitive Configuration & Data\nconfig.json\nshop_data.json\nverified_slips.json\nredemption_codes.json\ndiscount_codes.json\n\n# SSL Certificates\n*.pem\n\n# Environment Files\n*.env\n\n# OS generated files\n.DS_Store\nThumbs.db\n\n# NPM/Yarn generated logs\nnpm-debug.log*\nyarn-debug.log*\nyarn-error.log*`
+    // Create package.json, README, .gitignore if missing
+    const essentialFiles = {
+        'package.json': () => {
+            const packageJson = {
+                "name": "fb-messenger-shop-v2.2-web-config", // Updated name
+                "version": "2.2.0",
+                "description": "FB Messenger Bot shop: Angpao, Xncly Slip, Code Redeem, Line-based Stock, Web Config",
+                "main": path.basename(__filename),
+                "scripts": { "start": `node ${path.basename(__filename)}` },
+                "dependencies": {
+                    "axios": "^1.6.8", // Use specific version or ^1.0.0
+                    "body-parser": "^1.20.2",
+                    "ejs": "^3.1.9",
+                    "express": "^4.18.2", // Use specific version or ^4.0.0
+                    "form-data": "^4.0.0",
+                    "request": "^2.88.2" // Legacy, consider replacing with axios/fetch for FB API too
+                },
+                 "engines": { "node": ">=16.0.0" } // Specify Node version
+            };
+            return JSON.stringify(packageJson, null, 2);
+        },
+         'README.md': () => `# Facebook Messenger Digital Shop Bot (v2.2.0 - Web Config)\n\nA Facebook Messenger bot for selling digital goods with multiple payment/fulfillment options, line-based stock management, and web-based configuration.\n\n*   **NEW:** Web-based Configuration via \`/admin/settings\`.\n*   TrueMoney Wallet Angpao (Automatic Redemption)\n*   Bank Transfer (via Xncly Slip Verification API with duplicate slip checking)\n*   Code Redemption (User provides a 32-character code)\n*   Stock Management: Each line in the product's "Download Info" field represents one stock item.\n*   Admin Dashboard for managing products, categories, orders, redemption codes, and now **settings**.\n\n## Setup\n\n1.  **Install Dependencies:** \`npm install\`\n2.  **Initial Config (Optional but Recommended):** You can edit the created \`config.json\` file directly for the first run, especially for \`verifyToken\` and \`pageAccessToken\`.\n3.  **SSL (Optional but Recommended):** Edit the script (\`${path.basename(__filename)}\`) to set the correct paths for \`privateKeyPath\` and \`certificatePath\` if using HTTPS.\n4.  **Run:** \`npm start\` or \`node ${path.basename(__filename)}\`\n5.  **Admin Panel:** Access \`/admin\` (e.g., \`http://localhost:3000/admin\`).\n    *   Navigate to **Settings** (\`/admin/settings\`) to configure API keys, bank details, images, etc.\n    *   Add Products/Categories/Codes as before.\n6.  **Facebook App Setup:** Set up Messenger platform, Webhook (\`https://your_domain/webhook\` - ensure it matches your server setup), get Page Access Token, and set Verify Token (match the value in \`/admin/settings\`).\n\n## Key Changes in v2.2\n\n*   Added \`/admin/settings\` page to manage most configuration values via a web UI.\n*   Configuration is loaded from/saved to \`config.json\`.\n*   Bot logic now uses values from the loaded configuration.\n*   SSL paths and Port still need to be set directly in the script or via environment variables.`,
+        '.gitignore': () => `node_modules\n*.log\n# Data and Config Files (Should be backed up, but not in git)\nconfig.json\nshop_data.json\nverified_slips.json\nredemption_codes.json\n# SSL Certificates\n*.pem\n# Environment Files\n.env\n# OS Files\n.DS_Store`
     };
-
-    Object.entries(filesToCreate).forEach(([filename, contentFn]) => {
+    Object.entries(essentialFiles).forEach(([filename, contentFn]) => {
         const filepath = path.join(__dirname, filename);
         if (!fs.existsSync(filepath)) {
             try {
-                fs.writeFileSync(filepath, contentFn().trim() + '\n', 'utf8');
+                fs.writeFileSync(filepath, contentFn().trim(), 'utf8');
                 console.log(`Created initial file: ${filename}`);
-                if (filename === 'package.json') console.log("--> Run 'npm install' if you haven't already! <--");
-            } catch (error) {
-                console.error(`Error creating initial file ${filename}:`, error);
-            }
-        } else if (filename === '.gitignore' || filename === 'package.json') {
-             // Check if package.json or gitignore needs updating (simple check)
-             try {
-                 const currentContent = fs.readFileSync(filepath, 'utf8').trim();
-                 const newContentStr = contentFn().trim();
-
-                 if (filename === 'package.json' && currentContent !== newContentStr) {
-                     fs.writeFileSync(filepath, newContentStr + '\n', 'utf8');
-                      console.log(`Updated ${filename} content. Run 'npm install'.`);
-                 } else if (filename === '.gitignore') {
-                      // Ensure crucial files are ignored
-                      let toAppend = '';
-                      const filesToIgnore = [
-                          'config.json', 'shop_data.json', 'verified_slips.json',
-                          'redemption_codes.json', 'discount_codes.json', '*.pem', '.env'
-                      ];
-                      const lines = currentContent.split('\n').map(l => l.trim());
-                      filesToIgnore.forEach(f => {
-                          if (!lines.includes(f)) {
-                              toAppend += `\n${f}`;
-                          }
-                      });
-                      if (toAppend) {
-                          fs.appendFileSync(filepath, toAppend + '\n');
-                          console.log(`Updated .gitignore to include: ${toAppend.trim().replace(/\n/g, ', ')}`);
-                      }
-                 }
-             } catch(error) {
-                  console.error(`Error checking/updating ${filename}:`, error);
-             }
+                if (filename === 'package.json') console.log("--> Run 'npm install' <--");
+            } catch (error) { console.error(`Error creating ${filename}:`, error); }
         }
     });
-
-    // Ensure essential data files exist after load attempts
-    if (!fs.existsSync(DATA_FILE)) saveShopData(); // Creates shop_data.json
-    if (!fs.existsSync(VERIFIED_SLIPS_FILE)) saveVerifiedSlips(); // Creates verified_slips.json
-    if (!fs.existsSync(REDEMPTION_CODES_FILE)) saveValidRedemptionCodes(); // Creates redemption_codes.json
-    if (!fs.existsSync(DISCOUNT_CODES_FILE)) saveDiscountCodes(); // Creates discount_codes.json
 }
 
-// --- Start Application ---
-createInitialFiles(); // Ensure supporting files like package.json, readme, gitignore exist
-startServer(); // Start the HTTP/HTTPS server
+// Run initial file checks after defining functions
+createInitialFiles();
